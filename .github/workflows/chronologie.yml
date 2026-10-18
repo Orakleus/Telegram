@@ -99,7 +99,36 @@ jobs:
           # signature, and the public dummy keystore of the repository is on its lists. The test
           # build therefore gets its own package name, its own label and its own signing key.
           sed -i 's/^APP_PACKAGE=.*/APP_PACKAGE=app.chronologie.messenger/' gradle.properties
-          sed -i 's|<string name="AppNameBeta">Telegram Beta</string>|<string name="AppNameBeta">Telegram Chronologie</string>|' TMessagesProj/src/main/res/values/strings.xml
+          sed -i 's|<string name="AppNameBeta">Telegram Beta</string>|<string name="AppNameBeta">Chronologie</string>|' TMessagesProj/src/main/res/values/strings.xml
+          # A launcher icon of its own (adaptive icon: solid background + simple timeline glyph).
+          mkdir -p TMessagesProj/src/main/res/drawable TMessagesProj/src/main/res/values
+          cat > TMessagesProj/src/main/res/values/chronologie_icon.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="chronologie_icon_bg">#FF4F46E5</color>
+          </resources>
+          XML
+          cat > TMessagesProj/src/main/res/drawable/chronologie_icon_fg.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#FFFFFFFF" android:pathData="M51,28 h6 v52 h-6 z" />
+              <path android:fillColor="#FFFFFFFF" android:pathData="M42,36 h24 v4 h-24 z" />
+              <path android:fillColor="#FFFFFFFF" android:pathData="M42,68 h24 v4 h-24 z" />
+              <path android:fillColor="#FFFFFFFF" android:pathData="M54,52 m-10,0 a10,10 0 1,1 20,0 a10,10 0 1,1 -20,0" />
+          </vector>
+          XML
+          for f in ic_launcher ic_launcher_round; do
+            cat > "TMessagesProj/src/main/res/mipmap-anydpi-v26/$f.xml" <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/chronologie_icon_bg" />
+              <foreground android:drawable="@drawable/chronologie_icon_fg" />
+              <monochrome android:drawable="@drawable/chronologie_icon_fg" />
+          </adaptive-icon>
+          XML
+          done
           python3 - <<'PY'
           import json
           p = 'TMessagesProj_App/google-services.json'
@@ -115,7 +144,7 @@ jobs:
           PY
           cp ci/chronologie.keystore TMessagesProj/config/release.keystore
           grep -n "^APP_PACKAGE" gradle.properties
-          echo "identity=app.chronologie.messenger.beta, label Telegram Chronologie, own key" >> ci-notes.txt
+          echo "identity=app.chronologie.messenger.beta, label Chronologie, own icon, own key" >> ci-notes.txt
 
       - name: Configure the build for CI (single ABI, ccache, memory)
         run: |
@@ -156,7 +185,7 @@ jobs:
           APK=$(find . -path '*/build/*' -name '*.apk' -type f -printf '%s %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2- || true)
           echo "apk_found=$APK"
           if [ -n "$APK" ]; then
-            NAME="Telegram-Chronologie-build${{ github.run_number }}-arm64.apk"
+            NAME="Chronologie-build${{ github.run_number }}-arm64.apk"
             cp "$APK" "$NAME"
             ls -la "$NAME"
             echo "name=$NAME" >> "$GITHUB_OUTPUT"
