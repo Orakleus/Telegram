@@ -63,9 +63,9 @@ Rien d'autre. Aucune chaîne nouvelle n'est indispensable (le pluriel « message
 
 ### 3.2 Les cinq points d'accroche dans `ChatActivity`
 
-1. **Création.** Juste après l'ajout de `floatingDateView` à `contentView` (l. 7154) : créer `timelineView = new ChatTimelineView(context, themeDelegate)`, l'ajouter à `contentView` en `Gravity.TOP | Gravity.RIGHT`, largeur 72 dp, hauteur `MATCH_PARENT`. Ses marges haute et basse suivent `chatListView.getY() + chatListViewPaddingTop` (même calcul que `floatingDateView.onDraw`, l. 7130) et le haut de `chatActivityEnterView` ; elles sont rafraîchies depuis `invalidateMessagesVisiblePart()`.
+1. **Création.** Juste après l'ajout de `floatingDateView` à `contentView` (l. 7154) : créer `timelineView = new ChatTimelineView(context, themeDelegate)`, l'ajouter à `contentView` en `Gravity.TOP | Gravity.RIGHT`, largeur 72 dp, hauteur `MATCH_PARENT`. Ses marges haute et basse suivent `chatListView.getY() + chatListViewPaddingTop` (même calcul que `floatingDateView.onDraw`, l. 7130) et le haut de `chatActivityEnterView` ; elles sont rafraîchies depuis `updateMessagesVisiblePart(boolean)` (l. 15975).
 
-2. **Date courante.** Dans `invalidateMessagesVisiblePart()` (l. 15919), à l'endroit où `floatingDateView.setCustomDate(messageObject.messageOwner.date, …)` est appelé (l. 16428) : ajouter `timelineView.setCurrentDate(messageObject.messageOwner.date)`. C'est ce qui place la poignée à la bonne hauteur hors saisie.
+2. **Date courante.** Dans `updateMessagesVisiblePart(boolean)` (l. 15975 ; `invalidateMessagesVisiblePart()` l. 15919 ne fait que la déclencher), à l'endroit où `floatingDateView.setCustomDate(messageObject.messageOwner.date, …)` est appelé (l. 16428) : ajouter `timelineView.setCurrentDate(messageObject.messageOwner.date)`. C'est ce qui place la poignée à la bonne hauteur hors saisie.
 
 3. **Apparition.** Dans `showFloatingDateView` (l. 13691) : `timelineView.show()`. Dans `hideFloatingDateView` (l. 13719) : `timelineView.hide(hideDateDelay)`. Le listener de défilement (`chatListView.setOnScrollListener`, l. 6819) n'a pas besoin d'être touché, ces deux méthodes en sont déjà les relais.
 
@@ -235,6 +235,6 @@ En anglais, car l'équipe travaille en anglais. À envoyer en message direct ave
 
 ## Sources du dossier
 
-- Dépôt DrKLO/Telegram, commit f32ffeec (13.0.2) : `ChatActivity.java` l. 1886-1898, 4231-4271, 6819, 7097-7168, 12508-12559, 13691-13745, 15919, 16428 ; `RecyclerListView.java` l. 292-320, 520-1010 ; `SharedMediaLayout.java` l. 1525, 5078-5135, 8282-8335, 8725-8764 ; `CalendarActivity.java` l. 461-521, 1191 ; `SharedPhotoVideoCell2.java` l. 371-376 ; `MessagesController.java` l. 7876-7881, 11614 ; `BuildVars.java` l. 29-30 ; `TMessagesProj_App/build.gradle` l. 71-100, 120-166 ; `gradle.properties` l. 23 ; `README.md`.
+- Dépôt DrKLO/Telegram, commit f32ffeec (13.0.2) : `ChatActivity.java` l. 1886-1898, 4231-4271, 6819, 7097-7168, 12508-12559, 13691-13745, 15975, 16428 ; `RecyclerListView.java` l. 292-320, 520-1010 ; `SharedMediaLayout.java` l. 1525, 5078-5135, 8282-8335, 8725-8764 ; `CalendarActivity.java` l. 461-521, 1191 ; `SharedPhotoVideoCell2.java` l. 371-376 ; `MessagesController.java` l. 7876-7881, 11614 ; `BuildVars.java` l. 29-30 ; `TMessagesProj_App/build.gradle` l. 71-100, 120-166 ; `gradle.properties` l. 23 ; `README.md`.
 - Annonce « Designers × AI » du canal @designers (message 266).
 - Documentation Claude Code : https://code.claude.com/docs/en/setup.
