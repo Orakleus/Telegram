@@ -141,6 +141,14 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
 
     private final Calendar calendar = Calendar.getInstance();
 
+    // months of a year are only requested once the finger has rested on that year for a moment
+    private int pendingRefineYear;
+    private final Runnable refineRunnable = () -> {
+        if (dragging && index != null && pendingRefineYear != 0) {
+            index.refineYear(pendingRefineYear);
+        }
+    };
+
     private final Runnable hideRunnable = () -> {
         if (dragging) {
             scheduleHide(HIDE_DELAY_MS);
@@ -304,6 +312,7 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
 
     public void destroy() {
         AndroidUtilities.cancelRunOnUIThread(hideRunnable);
+        AndroidUtilities.cancelRunOnUIThread(refineRunnable);
         if (index != null) {
             index.setListener(null);
         }
@@ -552,6 +561,16 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
         return travelTop() + (travelBottom() - travelTop()) * clamp01(p);
     }
 
+    /** Refines the year under the finger after a short rest, so that a sweep across the ruler costs nothing. */
+    private void requestRefine(int year) {
+        if (year == pendingRefineYear) {
+            return;
+        }
+        pendingRefineYear = year;
+        AndroidUtilities.cancelRunOnUIThread(refineRunnable);
+        AndroidUtilities.runOnUIThread(refineRunnable, 250);
+    }
+
     // ---- bubble ----
 
     private void updateBubble(int date, boolean haptic) {
@@ -620,7 +639,7 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
                 } catch (Exception ignore) {}
                 bubbleMonthKey = -1;
                 updateBubble(currentDate > 0 ? currentDate : dateForY(cy), false);
-                index.refineYear(yearForY(cy));
+                requestRefine(yearForY(cy));
                 if (delegate != null) {
                     delegate.onDragChanged(true);
                 }
@@ -640,9 +659,7 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
                     progress = clamp01(startProgress + dy / travel);
                     float handleY = yForProgress(progress);
                     updateBubble(dateForY(handleY), true);
-                    if (index != null) {
-                        index.refineYear(yearForY(handleY));
-                    }
+                    requestRefine(yearForY(handleY));
                     invalidate();
                 }
                 return true;
@@ -655,6 +672,8 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
                 if (getParent() != null) {
                     getParent().requestDisallowInterceptTouchEvent(false);
                 }
+                AndroidUtilities.cancelRunOnUIThread(refineRunnable);
+                pendingRefineYear = 0;
                 if (index != null) {
                     index.cancelPending();
                 }
@@ -681,6 +700,8 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
                 if (getParent() != null) {
                     getParent().requestDisallowInterceptTouchEvent(false);
                 }
+                AndroidUtilities.cancelRunOnUIThread(refineRunnable);
+                pendingRefineYear = 0;
                 if (index != null) {
                     index.cancelPending();
                 }

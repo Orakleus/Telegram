@@ -49,6 +49,8 @@ public class ChatTimelineIndex {
     public static final int MIN_SPAN_SECONDS = 60 * 86400;
 
     private static final int MAX_IN_FLIGHT = 2;
+    /** Minimum spacing between two requests: the index must never look like a burst to the server. */
+    private static final long MIN_SEND_INTERVAL_MS = 220;
     private static final int OLDEST_PROBE = -1;
     private static final int NEWEST_PROBE = -2;
 
@@ -84,6 +86,7 @@ public class ChatTimelineIndex {
 
     private int inFlight;
     private boolean pumpScheduled;
+    private long lastSendTime;
     private boolean bootstrapStarted;
     private boolean newestKnown;
     private boolean oldestKnown;
@@ -330,11 +333,23 @@ public class ChatTimelineIndex {
             return;
         }
         while (inFlight < MAX_IN_FLIGHT && !queue.isEmpty()) {
+            long sinceLast = System.currentTimeMillis() - lastSendTime;
+            if (sinceLast < MIN_SEND_INTERVAL_MS) {
+                if (!pumpScheduled) {
+                    pumpScheduled = true;
+                    AndroidUtilities.runOnUIThread(() -> {
+                        pumpScheduled = false;
+                        pump();
+                    }, MIN_SEND_INTERVAL_MS - sinceLast + 5);
+                }
+                return;
+            }
             int date = queue.pollFirst();
             if (date >= 0 && answered.contains(date)) {
                 continue;
             }
             requested.add(date);
+            lastSendTime = System.currentTimeMillis();
             send(date);
         }
     }
