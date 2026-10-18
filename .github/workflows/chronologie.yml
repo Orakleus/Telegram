@@ -3,6 +3,8 @@ name: Build Chronologie APK
 # Builds a debug APK (arm64 only) of the Telegram Android client with the
 # Chronologie feature, on a free GitHub-hosted runner, and publishes it as a
 # GitHub pre-release so it can be installed on a phone from a plain link.
+# The release notes carry build diagnostics, so the outcome can be read through
+# the GitHub API even when the raw job logs are out of reach.
 
 on:
   push:
@@ -66,7 +68,7 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y -qq ccache && ccache --version | head -1
 
       - name: Restore ccache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ${{ env.CCACHE_DIR }}
           key: ccache-arm64-${{ github.sha }}
@@ -85,10 +87,11 @@ jobs:
           if [ -n "$API_ID" ] && [ -n "$API_HASH" ]; then
             sed -i "s|public static int APP_ID = .*;|public static int APP_ID = ${API_ID};|" "$F"
             sed -i "s|public static String APP_HASH = .*;|public static String APP_HASH = \"${API_HASH}\";|" "$F"
-            echo "API keys injected from secrets."
+            echo "api_keys=injected from secrets" >> ci-notes.txt
           else
-            echo "No TELEGRAM_API_ID / TELEGRAM_API_HASH secrets: building with the repository defaults."
+            echo "api_keys=repository defaults (no secrets)" >> ci-notes.txt
           fi
+          cat ci-notes.txt
 
       - name: Configure the build for CI (single ABI, ccache, memory)
         run: |
@@ -104,41 +107,94 @@ jobs:
           ccache --zero-stats > /dev/null
 
       - name: Build the debug APK
+        id: build
         run: |
+          set -o pipefail
           ./gradlew :TMessagesProj_App:assembleAfatDebug \
             -Pandroid.injected.build.abi=arm64-v8a \
-            --no-daemon --stacktrace --console=plain
+            --no-daemon --stacktrace --console=plain 2>&1 | tee build.log
         env:
           JAVA_TOOL_OPTIONS: -Dfile.encoding=UTF-8
 
-      - name: ccache statistics
+      - name: Save ccache
         if: always()
-        run: ccache --show-stats || true
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-arm64-${{ github.sha }}
 
-      - name: Name the APK
+      - name: Locate and name the APK
         id: apk
+        if: always()
         run: |
-          SRC=TMessagesProj_App/build/outputs/apk/afat/debug/app.apk
-          ls -la "$SRC"
-          NAME="Telegram-Chronologie-build${{ github.run_number }}-arm64.apk"
-          cp "$SRC" "$NAME"
-          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          APK=$(find TMessagesProj_App/build/outputs -name '*.apk' -type f 2>/dev/null | head -1 || true)
+          if [ -z "$APK" ]; then
+            APK=$(find . -path '*/build/outputs/apk/*' -name '*.apk' -type f 2>/dev/null | head -1 || true)
+          fi
+          echo "apk_found=$APK"
+          if [ -n "$APK" ]; then
+            NAME="Telegram-Chronologie-build${{ github.run_number }}-arm64.apk"
+            cp "$APK" "$NAME"
+            ls -la "$NAME"
+            echo "name=$NAME" >> "$GITHUB_OUTPUT"
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Write build diagnostics
+        if: always()
+        run: |
+          {
+            echo "## Build ${{ github.run_number }} — commit ${{ github.sha }}"
+            echo
+            echo "- build step outcome: ${{ steps.build.outcome }}"
+            echo "- apk found: ${{ steps.apk.outputs.ok }} (${{ steps.apk.outputs.name }})"
+            cat ci-notes.txt 2>/dev/null | sed 's/^/- /'
+            echo
+            echo "### Disk"
+            echo '```'
+            df -h / | tail -1
+            echo '```'
+            echo "### APK files under build/outputs"
+            echo '```'
+            find . -path '*/build/outputs/*' -name '*.apk' -type f 2>/dev/null | head -20
+            echo '```'
+            echo "### ccache"
+            echo '```'
+            ccache --show-stats 2>/dev/null | head -30
+            echo '```'
+            echo "### Gradle output (last 150 lines)"
+            echo '```'
+            tail -n 150 build.log 2>/dev/null | cut -c1-400
+            echo '```'
+            echo "### Gradle errors and warnings of interest"
+            echo '```'
+            grep -nE "error:|FAILED|What went wrong|Exception|BUILD " build.log 2>/dev/null | head -80 | cut -c1-400
+            echo '```'
+          } > ci-diagnostics.md
+          wc -c ci-diagnostics.md
 
       - name: Upload the APK as a workflow artifact
+        if: steps.apk.outputs.ok == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.apk.outputs.name }}
           path: ${{ steps.apk.outputs.name }}
           if-no-files-found: error
 
-      - name: Publish the APK as a GitHub pre-release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: chronologie-build-${{ github.run_number }}
-          name: Chronologie — build ${{ github.run_number }}
-          prerelease: true
-          body: |
-            Telegram Android 13.0.2 + Chronologie, debug build, arm64 only.
-            Commit: ${{ github.sha }}
-            Installs as « Telegram Beta » next to the regular Telegram app.
-          files: ${{ steps.apk.outputs.name }}
+      - name: Publish the APK (or the diagnostics) as a GitHub pre-release
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="chronologie-build-${{ github.run_number }}"
+          if [ "${{ steps.apk.outputs.ok }}" = "true" ]; then
+            gh release create "$TAG" "${{ steps.apk.outputs.name }}" --prerelease \
+              --title "Chronologie — build ${{ github.run_number }}" \
+              --notes-file ci-diagnostics.md
+          else
+            gh release create "$TAG" --prerelease \
+              --title "Chronologie — build ${{ github.run_number }} (FAILED)" \
+              --notes-file ci-diagnostics.md
+          fi
