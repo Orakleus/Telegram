@@ -58,15 +58,15 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
 
     public static final int WIDTH_DP = 220; // wide enough to hold the ruler and the bubble; touches outside the handle fall through
 
-    private static final long HIDE_DELAY_MS = 1800;
+    private static final long HIDE_DELAY_MS = 3000;
     private static final float HANDLE_RADIUS_DP = 22f;
-    private static final float HANDLE_EDGE_INSET_DP = 7f; // the disc is cut by the edge, like the shared media scroller
+    private static final float HANDLE_EDGE_INSET_DP = 26f; // whole disc visible, 4 dp from the edge, easy to grab
     private static final float VERTICAL_MARGIN_DP = 8f;
     /** Kept free above the composer, where the chat's side buttons live, so the handle sits under the thumb. */
-    private static final float BOTTOM_RESERVE_DP = 64f;
-    private static final float BAR_MAX_DP = 22f;
+    private static final float BOTTOM_RESERVE_DP = 120f;
+    private static final float BAR_MAX_DP = 20f;
     private static final float BAR_THICKNESS_DP = 2f;
-    private static final float PANEL_WIDTH_DP = 88f;
+    private static final float PANEL_WIDTH_DP = 108f;
     private static final float YEAR_FLOOR_DP = 28f;
     private static final float LABEL_MIN_HEIGHT_DP = 14f;
 
@@ -88,6 +88,8 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
     private final RectF panelRect = new RectF();
     private final RectF hitRect = new RectF();
     private final Drawable shadowDrawable;
+    private final Paint shadowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private float shadowRadius;
 
     private final AnimatedFloat showProgress;
     private final AnimatedFloat dragProgress;
@@ -179,7 +181,11 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
         barPaint.setStrokeWidth(AndroidUtilities.dp(BAR_THICKNESS_DP));
         barPaint.setStrokeCap(Paint.Cap.ROUND);
 
-        shadowDrawable = ContextCompat.getDrawable(context, R.drawable.fast_scroll_shadow);
+        shadowDrawable = null; // the disc no longer hugs the edge: a soft radial shadow replaces the edge drawable
+        float r = AndroidUtilities.dp(HANDLE_RADIUS_DP);
+        shadowRadius = r + AndroidUtilities.dp(8);
+        shadowPaint.setShader(new android.graphics.RadialGradient(0f, 0f, shadowRadius,
+                new int[]{0x4C000000, 0x33000000, 0x00000000}, new float[]{0f, r / shadowRadius, 1f}, android.graphics.Shader.TileMode.CLAMP));
 
         updateColors();
         setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
@@ -596,7 +602,7 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
                 }
                 float cx = handleCenterX();
                 float cy = handleCenterY();
-                float r = handleRadius() + AndroidUtilities.dp(8);
+                float r = handleRadius() + AndroidUtilities.dp(12);
                 hitRect.set(cx - r, cy - r, cx + r, cy + r);
                 if (!hitRect.contains(x, y)) {
                     return false;
@@ -718,7 +724,7 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
                 float textAlpha = (drag - 0.5f) * 2f * visible;
                 yearTextPaint.setAlpha((int) (255 * textAlpha));
                 tickPaint.setAlpha((int) (110 * textAlpha));
-                float labelX = rtl ? AndroidUtilities.dp(34) : width - AndroidUtilities.dp(34);
+                float labelX = rtl ? AndroidUtilities.dp(54) : width - AndroidUtilities.dp(54);
                 float tickFrom = rtl ? AndroidUtilities.dp(4) : width - AndroidUtilities.dp(PANEL_WIDTH_DP - 4);
                 float tickTo = rtl ? AndroidUtilities.dp(10) : width - AndroidUtilities.dp(PANEL_WIDTH_DP - 10);
                 float minLabel = AndroidUtilities.dp(LABEL_MIN_HEIGHT_DP);
@@ -742,7 +748,12 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
             }
         }
 
-        // shadow hugging the edge, like the shared media scroller
+        // soft shadow under the disc
+        canvas.save();
+        canvas.translate(cx, cy + AndroidUtilities.dp(2));
+        shadowPaint.setAlpha(alpha);
+        canvas.drawCircle(0f, 0f, shadowRadius, shadowPaint);
+        canvas.restore();
         if (shadowDrawable != null) {
             int w = shadowDrawable.getIntrinsicWidth();
             int h = shadowDrawable.getIntrinsicHeight();
