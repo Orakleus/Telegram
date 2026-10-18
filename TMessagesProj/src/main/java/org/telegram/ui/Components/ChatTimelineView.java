@@ -655,6 +655,9 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
                 if (getParent() != null) {
                     getParent().requestDisallowInterceptTouchEvent(false);
                 }
+                if (index != null) {
+                    index.cancelPending();
+                }
                 if (delegate != null) {
                     delegate.onDragChanged(false);
                     if (moved) {
@@ -677,6 +680,9 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
                 dragging = false;
                 if (getParent() != null) {
                     getParent().requestDisallowInterceptTouchEvent(false);
+                }
+                if (index != null) {
+                    index.cancelPending();
                 }
                 if (delegate != null) {
                     delegate.onDragChanged(false);

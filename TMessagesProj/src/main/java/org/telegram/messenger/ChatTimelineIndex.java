@@ -48,7 +48,7 @@ public class ChatTimelineIndex {
     public static final int MIN_MESSAGES = 200;
     public static final int MIN_SPAN_SECONDS = 60 * 86400;
 
-    private static final int MAX_IN_FLIGHT = 3;
+    private static final int MAX_IN_FLIGHT = 2;
     private static final int OLDEST_PROBE = -1;
     private static final int NEWEST_PROBE = -2;
 
@@ -126,8 +126,24 @@ public class ChatTimelineIndex {
         return inFlight > 0 || !queue.isEmpty();
     }
 
+    /** True once every month boundary of the year that falls inside the history has been answered. */
     public boolean isYearRefined(int year) {
-        return refinedYears.contains(year);
+        if (!isReady()) {
+            return false;
+        }
+        for (int month = Calendar.FEBRUARY; month <= Calendar.DECEMBER; month++) {
+            int date = startOf(year, month);
+            if (date > firstDate && date <= lastDate && !answered.contains(date)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Drops every request not yet sent, so that a jump requested by the chat is not queued behind the index. */
+    public void cancelPending() {
+        queue.clear();
+        refinedYears.clear();
     }
 
     public int getFirstYear() {
@@ -150,20 +166,42 @@ public class ChatTimelineIndex {
         pump();
     }
 
-    /** Asks for the month boundaries of a year (eleven requests), ahead of everything else in the queue. */
+    /**
+     * Asks for the month boundaries of the year under the finger (up to eleven requests). Only one year is
+     * pending at a time: the months of the previous year still waiting in the queue are dropped, so that
+     * sweeping across the ruler never piles up dozens of requests ahead of the jump.
+     */
     public void refineYear(int year) {
-        if (!isReady() || refinedYears.contains(year) || year < getFirstYear() || year > getLastYear()) {
+        if (!isReady() || year < getFirstYear() || year > getLastYear()) {
             return;
         }
+        if (refinedYears.contains(year)) {
+            return;
+        }
+        // keep only what is not a month boundary (bootstrap probes and year boundaries), drop other months
+        ArrayDeque<Integer> kept = new ArrayDeque<>();
+        for (Integer date : queue) {
+            if (date < 0 || isYearBoundary(date)) {
+                kept.addLast(date);
+            }
+        }
+        queue.clear();
+        queue.addAll(kept);
+        refinedYears.clear();
         refinedYears.add(year);
         for (int month = Calendar.DECEMBER; month >= Calendar.FEBRUARY; month--) {
             int date = startOf(year, month);
             if (date > firstDate && date <= lastDate && !requested.contains(date)) {
-                queue.remove(date);
                 queue.addFirst(date);
             }
         }
         pump();
+    }
+
+    private boolean isYearBoundary(int date) {
+        calendar.setTimeInMillis(date * 1000L);
+        return calendar.get(Calendar.MONTH) == Calendar.JANUARY && calendar.get(Calendar.DAY_OF_MONTH) == 1
+                && calendar.get(Calendar.HOUR_OF_DAY) == 0 && calendar.get(Calendar.MINUTE) == 0;
     }
 
     // ---- mapping ----
