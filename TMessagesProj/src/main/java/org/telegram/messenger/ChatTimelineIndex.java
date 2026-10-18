@@ -1,5 +1,6 @@
 package org.telegram.messenger;
 
+import android.os.SystemClock;
 import android.util.LruCache;
 
 import org.telegram.tgnet.ConnectionsManager;
@@ -9,6 +10,7 @@ import org.telegram.tgnet.TLRPC;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Calendar;
+import java.util.Collections;
 import java.util.HashSet;
 
 /**
@@ -16,8 +18,8 @@ import java.util.HashSet;
  *
  * Knows, for a dialog, how many messages it holds, when the first and the last
  * were sent, and how many messages were sent before a set of boundary dates
- * (every 1st of January first, then every month of a year on demand). From
- * that it maps a date to a rank in the history and back, which is what the
+ * (every 1st of January first, then the months around the finger on demand).
+ * From that it maps a date to a rank in the history and back, which is what the
  * timeline scrubber needs to lay years out proportionally to their content.
  *
  * Everything comes from messages.getHistory with offset_date and limit 1: the
@@ -25,6 +27,13 @@ import java.util.HashSet;
  * (rank of the returned message counted from the newest), the very calculation
  * ChatActivity already performs to count a day's messages. Exact for every kind
  * of dialog; no new API, no schema change.
+ *
+ * The server rations messages.getHistory per account: too many calls in a short
+ * time and every further call, including the chat's own jump to a date, is held
+ * back for tens of seconds. So the index is deliberately slow: one request at a
+ * time, never two closer than {@link #BASE_SEND_INTERVAL_MS}, a small burst then
+ * a steady trickle, and it stops entirely for the time the server asks when a
+ * FLOOD_WAIT comes back.
  *
  * All methods must be called on the UI thread.
  */
@@ -48,9 +57,16 @@ public class ChatTimelineIndex {
     public static final int MIN_MESSAGES = 200;
     public static final int MIN_SPAN_SECONDS = 60 * 86400;
 
-    private static final int MAX_IN_FLIGHT = 2;
-    /** Minimum spacing between two requests: the index must never look like a burst to the server. */
-    private static final long MIN_SEND_INTERVAL_MS = 220;
+    private static final int MAX_IN_FLIGHT = 1;
+    /** Minimum spacing between two requests; doubled every time the server complains, up to the maximum. */
+    private static final long BASE_SEND_INTERVAL_MS = 400;
+    private static final long MAX_SEND_INTERVAL_MS = 2000;
+    /** Token bucket: a short burst (at the spacing above) for the bootstrap, then a trickle of one per REFILL_MS. */
+    private static final int BURST = 6;
+    private static final long REFILL_MS = 1000;
+    /** After this many failed requests the index gives up for the session rather than nagging the server. */
+    private static final int MAX_ERRORS = 12;
+    private static final long RETRY_FAILED_AFTER_MS = 10_000;
     private static final int OLDEST_PROBE = -1;
     private static final int NEWEST_PROBE = -2;
 
@@ -77,21 +93,32 @@ public class ChatTimelineIndex {
     public int firstMessageId;
     public int lastMessageId;
 
+    // diagnostics, shown by the view's debug readout
+    public int sentCount;
+    public int answeredCount;
+    public int errorCount;
+    public int floodCount;
+    public int lastFloodSeconds;
+
     private final ArrayList<Sample> samples = new ArrayList<>();
-    private final HashSet<Integer> requested = new HashSet<>();
     private final HashSet<Integer> answered = new HashSet<>();
-    private final HashSet<Integer> refinedYears = new HashSet<>();
+    private final HashSet<Integer> inFlightDates = new HashSet<>();
+    private final HashSet<Integer> failed = new HashSet<>();
     private final ArrayDeque<Integer> queue = new ArrayDeque<>();
+    private final ArrayList<Integer> wanted = new ArrayList<>();
     private final Calendar calendar = Calendar.getInstance();
 
-    private int inFlight;
     private boolean pumpScheduled;
     private long lastSendTime;
+    private long sendInterval = BASE_SEND_INTERVAL_MS;
+    private long nextTokenTime; // token bucket, GCRA form: theoretical time of the next request
+    private long holdUntil;
+    private long floodWaitUntil;
+    private long lastFailureClear;
     private boolean bootstrapStarted;
     private boolean newestKnown;
     private boolean oldestKnown;
-    private boolean yearsEnqueued;
-    private long floodWaitUntil;
+    private boolean yearsComplete;
     private Listener listener;
 
     private ChatTimelineIndex(int currentAccount, long dialogId) {
@@ -99,16 +126,11 @@ public class ChatTimelineIndex {
         this.dialogId = dialogId;
     }
 
-    /** A (new) fragment uses this index: requests are bound to its guid; unanswered ones are re-queued. */
+    /** A (new) fragment uses this index: requests are bound to its guid; the ones the old fragment cancelled are forgotten. */
     public void attach(int classGuid) {
         if (this.classGuid != classGuid) {
             this.classGuid = classGuid;
-            inFlight = 0;
-            for (Integer date : requested) {
-                if (!answered.contains(date) && !queue.contains(date)) {
-                    queue.addLast(date);
-                }
-            }
+            inFlightDates.clear();
         }
     }
 
@@ -126,7 +148,27 @@ public class ChatTimelineIndex {
     }
 
     public boolean isLoading() {
-        return inFlight > 0 || !queue.isEmpty();
+        return !inFlightDates.isEmpty() || !queue.isEmpty();
+    }
+
+    /** Milliseconds left of a wait the server imposed, 0 when none. */
+    public long getFloodWaitRemainingMs() {
+        return Math.max(0, floodWaitUntil - SystemClock.elapsedRealtime());
+    }
+
+    /** A boundary is known when it was answered, or when it falls outside the history (rank 0 or total). */
+    private boolean isKnown(int date) {
+        return date <= firstDate || date > lastDate || answered.contains(date);
+    }
+
+    /** True once both ends of a month are known, so that its count is exact. */
+    public boolean isMonthRefined(int year, int month) {
+        if (!isReady()) {
+            return false;
+        }
+        int from = startOf(year, month);
+        int to = month == Calendar.DECEMBER ? startOf(year + 1, Calendar.JANUARY) : startOf(year, month + 1);
+        return isKnown(from) && isKnown(to);
     }
 
     /** True once every month boundary of the year that falls inside the history has been answered. */
@@ -134,19 +176,22 @@ public class ChatTimelineIndex {
         if (!isReady()) {
             return false;
         }
-        for (int month = Calendar.FEBRUARY; month <= Calendar.DECEMBER; month++) {
-            int date = startOf(year, month);
-            if (date > firstDate && date <= lastDate && !answered.contains(date)) {
+        for (int month = Calendar.JANUARY; month <= Calendar.DECEMBER; month++) {
+            if (!isKnown(startOf(year, month))) {
                 return false;
             }
         }
-        return true;
+        return isKnown(startOf(year + 1, Calendar.JANUARY));
     }
 
-    /** Drops every request not yet sent, so that a jump requested by the chat is not queued behind the index. */
+    /** Drops every request not yet sent, so that nothing of the index is queued behind a jump the chat requests. */
     public void cancelPending() {
         queue.clear();
-        refinedYears.clear();
+    }
+
+    /** Keeps the index silent for a moment, typically while the chat performs a jump. */
+    public void holdFor(long ms) {
+        holdUntil = Math.max(holdUntil, SystemClock.elapsedRealtime() + ms);
     }
 
     public int getFirstYear() {
@@ -159,46 +204,66 @@ public class ChatTimelineIndex {
 
     /** Starts loading: newest and oldest message, then every 1st of January. Cheap to call again. */
     public void load() {
+        if (yearsComplete || errorCount >= MAX_ERRORS) {
+            return;
+        }
+        if (!failed.isEmpty() && SystemClock.elapsedRealtime() - lastFailureClear > RETRY_FAILED_AFTER_MS) {
+            // a boundary that failed is tried again, but not before a while
+            failed.clear();
+            lastFailureClear = SystemClock.elapsedRealtime();
+        }
         if (!bootstrapStarted) {
             bootstrapStarted = true;
             queue.addFirst(NEWEST_PROBE);
             queue.addLast(OLDEST_PROBE);
-        } else if (isReady() && !yearsEnqueued) {
+        } else if (isReady()) {
             enqueueYears();
+        } else {
+            if (!newestKnown && !isPending(NEWEST_PROBE) && !failed.contains(NEWEST_PROBE)) {
+                queue.addFirst(NEWEST_PROBE);
+            }
+            if (!oldestKnown && !isPending(OLDEST_PROBE) && !failed.contains(OLDEST_PROBE)) {
+                queue.addLast(OLDEST_PROBE);
+            }
         }
         pump();
     }
 
     /**
-     * Asks for the month boundaries of the year under the finger (up to eleven requests). Only one year is
-     * pending at a time: the months of the previous year still waiting in the queue are dropped, so that
-     * sweeping across the ruler never piles up dozens of requests ahead of the jump.
+     * Asks for the month boundaries around {@code date}: the two enclosing the month under the finger first,
+     * then the other months of that year, nearest first. The queue is replaced each time, so sweeping across
+     * the ruler never piles up requests: at most one is in flight, the rest waits for the finger to settle.
      */
-    public void refineYear(int year) {
-        if (!isReady() || year < getFirstYear() || year > getLastYear()) {
+    public void refineAround(int date) {
+        if (!isReady() || date <= 0) {
             return;
         }
-        if (refinedYears.contains(year)) {
+        int year = yearOf(date);
+        if (year < getFirstYear() || year > getLastYear()) {
             return;
         }
-        // keep only what is not a month boundary (bootstrap probes and year boundaries), drop other months
-        ArrayDeque<Integer> kept = new ArrayDeque<>();
-        for (Integer date : queue) {
-            if (date < 0 || isYearBoundary(date)) {
-                kept.addLast(date);
+        wanted.clear();
+        for (int month = Calendar.FEBRUARY; month <= Calendar.DECEMBER; month++) {
+            int d = startOf(year, month);
+            if (!isKnown(d) && !inFlightDates.contains(d) && !failed.contains(d)) {
+                wanted.add(d);
             }
         }
-        queue.clear();
-        queue.addAll(kept);
-        refinedYears.clear();
-        refinedYears.add(year);
-        for (int month = Calendar.DECEMBER; month >= Calendar.FEBRUARY; month--) {
-            int date = startOf(year, month);
-            if (date > firstDate && date <= lastDate && !requested.contains(date)) {
-                queue.addFirst(date);
+        final int around = date;
+        Collections.sort(wanted, (a, b) -> Integer.compare(Math.abs(a - around), Math.abs(b - around)));
+        // the bootstrap (probes, year boundaries) stays ahead: it shapes the whole ruler
+        for (int i = queue.size(); i > 0; i--) {
+            int d = queue.pollFirst();
+            if (d < 0 || isYearBoundary(d)) {
+                queue.addLast(d);
             }
         }
+        queue.addAll(wanted);
         pump();
+    }
+
+    private boolean isPending(int date) {
+        return inFlightDates.contains(date) || queue.contains(date);
     }
 
     private boolean isYearBoundary(int date) {
@@ -277,7 +342,7 @@ public class ChatTimelineIndex {
         return rankForDate(startOf(year + 1, Calendar.JANUARY)) - rankForDate(startOf(year, Calendar.JANUARY));
     }
 
-    /** Messages sent in a month ({@code month} as in Calendar, 0-based). */
+    /** Messages sent in a month ({@code month} as in Calendar, 0-based); exact once the month is refined, interpolated before. */
     public int countForMonth(int year, int month) {
         int from = startOf(year, month);
         int to = month == Calendar.DECEMBER ? startOf(year + 1, Calendar.JANUARY) : startOf(year, month + 1);
@@ -309,47 +374,52 @@ public class ChatTimelineIndex {
     // ---- loading ----
 
     private void enqueueYears() {
-        yearsEnqueued = true;
+        boolean complete = true;
         int first = getFirstYear();
         int last = getLastYear();
         for (int year = first + 1; year <= last; year++) {
             int date = startOf(year, Calendar.JANUARY);
-            if (!requested.contains(date)) {
+            if (isKnown(date)) {
+                continue;
+            }
+            complete = false;
+            if (!isPending(date) && !failed.contains(date)) {
                 queue.addLast(date);
             }
         }
+        yearsComplete = complete;
+    }
+
+    private void schedulePump(long delay) {
+        if (pumpScheduled) {
+            return;
+        }
+        pumpScheduled = true;
+        AndroidUtilities.runOnUIThread(() -> {
+            pumpScheduled = false;
+            pump();
+        }, delay);
     }
 
     private void pump() {
-        if (System.currentTimeMillis() < floodWaitUntil) {
-            if (!pumpScheduled) {
-                pumpScheduled = true;
-                long delay = floodWaitUntil - System.currentTimeMillis() + 50;
-                AndroidUtilities.runOnUIThread(() -> {
-                    pumpScheduled = false;
-                    pump();
-                }, delay);
-            }
+        if (errorCount >= MAX_ERRORS) {
+            queue.clear();
             return;
         }
-        while (inFlight < MAX_IN_FLIGHT && !queue.isEmpty()) {
-            long sinceLast = System.currentTimeMillis() - lastSendTime;
-            if (sinceLast < MIN_SEND_INTERVAL_MS) {
-                if (!pumpScheduled) {
-                    pumpScheduled = true;
-                    AndroidUtilities.runOnUIThread(() -> {
-                        pumpScheduled = false;
-                        pump();
-                    }, MIN_SEND_INTERVAL_MS - sinceLast + 5);
-                }
+        while (inFlightDates.size() < MAX_IN_FLIGHT && !queue.isEmpty()) {
+            long now = SystemClock.elapsedRealtime();
+            long earliest = Math.max(lastSendTime + sendInterval, nextTokenTime - (BURST - 1) * REFILL_MS);
+            earliest = Math.max(earliest, Math.max(holdUntil, floodWaitUntil));
+            if (earliest > now) {
+                schedulePump(earliest - now + 5);
                 return;
             }
             int date = queue.pollFirst();
-            if (date >= 0 && answered.contains(date)) {
+            if (date >= 0 && (answered.contains(date) || inFlightDates.contains(date))) {
                 continue;
             }
-            requested.add(date);
-            lastSendTime = System.currentTimeMillis();
+            lastSendTime = now;
+            nextTokenTime = Math.max(now, nextTokenTime) + REFILL_MS;
             send(date);
         }
     }
@@ -366,12 +436,17 @@ public class ChatTimelineIndex {
         } else {
             req.offset_date = date;
         }
-        inFlight++;
+        inFlightDates.add(date);
+        sentCount++;
+        final int guid = classGuid;
+        // FailOnServerErrors: a FLOOD_WAIT must reach us, not be retried silently by the network layer
         int reqId = ConnectionsManager.getInstance(currentAccount).sendRequest(req, (response, error) -> AndroidUtilities.runOnUIThread(() -> {
-            inFlight = Math.max(0, inFlight - 1);
+            inFlightDates.remove(date);
             handle(date, response, error);
-            pump();
-        }));
+            if (guid == classGuid) {
+                pump();
+            }
+        }), ConnectionsManager.RequestFlagFailOnServerErrors);
         ConnectionsManager.getInstance(currentAccount).bindRequestToGuid(reqId, classGuid);
     }
 
@@ -382,22 +457,32 @@ public class ChatTimelineIndex {
                 try {
                     seconds = Integer.parseInt(error.text.substring("FLOOD_WAIT_".length()));
                 } catch (Exception ignore) {}
-                floodWaitUntil = System.currentTimeMillis() + seconds * 1000L;
+                floodCount++;
+                lastFloodSeconds = seconds;
+                floodWaitUntil = SystemClock.elapsedRealtime() + (seconds + 1) * 1000L;
+                sendInterval = Math.min(MAX_SEND_INTERVAL_MS, sendInterval * 2);
                 queue.addFirst(date);
+                FileLog.d("ChatTimelineIndex: FLOOD_WAIT " + seconds + "s after " + sentCount + " requests, spacing now " + sendInterval + "ms");
             } else {
+                errorCount++;
+                failed.add(date);
                 FileLog.d("ChatTimelineIndex: request for " + date + " failed: " + error.text);
-                requested.remove(date);
+            }
+            if (listener != null) {
+                listener.onIndexUpdated(this);
             }
             return;
         }
         if (!(response instanceof TLRPC.messages_Messages)) {
-            requested.remove(date);
+            errorCount++;
+            failed.add(date);
             return;
         }
         TLRPC.messages_Messages res = (TLRPC.messages_Messages) response;
         MessagesController.getInstance(currentAccount).putUsers(res.users, false);
         MessagesController.getInstance(currentAccount).putChats(res.chats, false);
         answered.add(date);
+        answeredCount++;
 
         boolean hasCount = !(res instanceof TLRPC.TL_messages_messages);
         TLRPC.Message message = res.messages.isEmpty() ? null : res.messages.get(0);
@@ -433,7 +518,7 @@ public class ChatTimelineIndex {
             insertSample(date, rankFromOldest);
         }
 
-        if (isReady() && !yearsEnqueued) {
+        if (isReady() && !yearsComplete) {
             enqueueYears();
         }
         if (listener != null) {

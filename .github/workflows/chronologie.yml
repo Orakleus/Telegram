@@ -99,6 +99,9 @@ jobs:
           # signature, and the public dummy keystore of the repository is on its lists. The test
           # build therefore gets its own package name, its own label and its own signing key.
           sed -i 's/^APP_PACKAGE=.*/APP_PACKAGE=app.chronologie.messenger/' gradle.properties
+          # The build number goes into the version name (Settings footer, and the view's debug readout),
+          # so that a recording tells which build it shows.
+          sed -i -E 's/^(APP_VERSION_NAME=.*)$/\1-b${{ github.run_number }}/' gradle.properties
           sed -i 's|<string name="AppNameBeta">Telegram Beta</string>|<string name="AppNameBeta">Chronologie</string>|' TMessagesProj/src/main/res/values/strings.xml
           # A launcher icon of its own (adaptive icon: solid background + simple timeline glyph).
           mkdir -p TMessagesProj/src/main/res/drawable TMessagesProj/src/main/res/values
