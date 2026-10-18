@@ -93,6 +93,30 @@ jobs:
           fi
           cat ci-notes.txt
 
+      - name: Give the build its own identity (package name, label, signing key)
+        run: |
+          # Play Protect blocks an app that carries Telegram's package name without Telegram's
+          # signature, and the public dummy keystore of the repository is on its lists. The test
+          # build therefore gets its own package name, its own label and its own signing key.
+          sed -i 's/^APP_PACKAGE=.*/APP_PACKAGE=app.chronologie.messenger/' gradle.properties
+          sed -i 's|<string name="AppNameBeta">Telegram Beta</string>|<string name="AppNameBeta">Telegram Chronologie</string>|' TMessagesProj/src/main/res/values/strings.xml
+          python3 - <<'PY'
+          import json
+          p = 'TMessagesProj_App/google-services.json'
+          d = json.load(open(p))
+          clients = d['client']
+          template = next(c for c in clients if c['client_info']['android_client_info']['package_name'] == 'org.telegram.messenger.beta')
+          for name in ('app.chronologie.messenger', 'app.chronologie.messenger.beta'):
+              c = json.loads(json.dumps(template))
+              c['client_info']['android_client_info']['package_name'] = name
+              clients.append(c)
+          json.dump(d, open(p, 'w'), indent=2)
+          print('google-services.json now lists', [c['client_info']['android_client_info']['package_name'] for c in clients])
+          PY
+          cp ci/chronologie.keystore TMessagesProj/config/release.keystore
+          grep -n "^APP_PACKAGE" gradle.properties
+          echo "identity=app.chronologie.messenger.beta, label Telegram Chronologie, own key" >> ci-notes.txt
+
       - name: Configure the build for CI (single ABI, ccache, memory)
         run: |
           # Only build the ABI of the test phone (arm64-v8a): four times less native compilation.
