@@ -165,6 +165,7 @@ jobs:
           set -o pipefail
           ./gradlew :TMessagesProj_App:assembleAfatDebug \
             -Pandroid.injected.build.abi=arm64-v8a \
+            -Pandroid.injected.testOnly=false \
             --no-daemon --stacktrace --console=plain 2>&1 | tee build.log
         env:
           JAVA_TOOL_OPTIONS: -Dfile.encoding=UTF-8
@@ -180,6 +181,13 @@ jobs:
         id: apk
         if: always()
         run: |
+          # An APK built with IDE-injected properties is marked testOnly unless told otherwise:
+          # such an APK is refused by the normal installer ("App not installed").
+          if unzip -p TMessagesProj_App/build/intermediates/apk/afat/debug/app.apk AndroidManifest.xml 2>/dev/null | strings -e l | grep -q '^testOnly$'; then
+            echo "testOnly attribute still present in the manifest" | tee -a ci-notes.txt
+          else
+            echo "testOnly attribute absent from the manifest" | tee -a ci-notes.txt
+          fi
           # With android.injected.build.abi the Android Gradle plugin writes the APK under
           # build/intermediates/apk instead of build/outputs/apk: look everywhere, take the largest.
           APK=$(find . -path '*/build/*' -name '*.apk' -type f -printf '%s %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2- || true)
