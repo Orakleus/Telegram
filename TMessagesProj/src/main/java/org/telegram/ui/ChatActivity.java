@@ -150,6 +150,7 @@ import org.telegram.messenger.ChatMessageSharedResources;
 import org.telegram.messenger.ChatMessagesMetadataController;
 import org.telegram.messenger.ChatObject;
 import org.telegram.messenger.ChatThemeController;
+import org.telegram.messenger.ChatTimelineIndex;
 import org.telegram.utils.code.highlight.CodeHighlighting;
 import org.telegram.messenger.ContactsController;
 import org.telegram.messenger.DialogObject;
@@ -7179,7 +7180,11 @@ public class ChatActivity extends BaseFragment implements
 
         // Chronologie: timeline scrubber on the trailing edge of the chat
         timelineView = new ChatTimelineView(context, themeDelegate);
-        timelineView.setAllowed(chatMode == MODE_DEFAULT && !isTopic && !isSecretChat() && !inPreviewMode && !isInsideContainer && !isReport());
+        final boolean timelineAllowed = chatMode == MODE_DEFAULT && !isTopic && !isSecretChat() && !inPreviewMode && !isInsideContainer && !isReport();
+        timelineView.setAllowed(timelineAllowed);
+        if (timelineAllowed) {
+            timelineView.setIndex(ChatTimelineIndex.get(currentAccount, dialog_id, classGuid));
+        }
         timelineView.setDelegate(new ChatTimelineView.Delegate() {
             @Override
             public void onJumpToDate(int date) {
@@ -7208,7 +7213,7 @@ public class ChatActivity extends BaseFragment implements
                 return !actionBar.isActionModeShowed() && !isReport() && (searchItem == null || !searchItem.isSearchFieldVisible());
             }
         });
-        contentView.addView(timelineView, LayoutHelper.createFrame(72, LayoutHelper.MATCH_PARENT, Gravity.TOP | (LocaleController.isRTL ? Gravity.LEFT : Gravity.RIGHT)));
+        contentView.addView(timelineView, LayoutHelper.createFrame(ChatTimelineView.WIDTH_DP, LayoutHelper.MATCH_PARENT, Gravity.TOP | (LocaleController.isRTL ? Gravity.LEFT : Gravity.RIGHT)));
 
         if (currentChat != null && chatMode != MODE_WELCOME_MESSAGES) {
             // todo: only for default mode ??

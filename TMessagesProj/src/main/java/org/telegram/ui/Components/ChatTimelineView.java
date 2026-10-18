@@ -17,6 +17,7 @@ import androidx.core.content.ContextCompat;
 import androidx.core.graphics.ColorUtils;
 
 import org.telegram.messenger.AndroidUtilities;
+import org.telegram.messenger.ChatTimelineIndex;
 import org.telegram.messenger.LocaleController;
 import org.telegram.messenger.R;
 import org.telegram.ui.ActionBar.Theme;
@@ -28,20 +29,21 @@ import java.util.Calendar;
  *
  * Lives on the trailing edge of the chat list, on top of it. A round handle
  * appears while the user scrolls, aligned with the date currently shown at the
- * top of the chat. Grabbing the handle and dragging it scrubs through the whole
- * history: a bubble next to the finger shows the month under it, and releasing
- * jumps the chat to that date (through ChatActivity.jumpToDate). A tap without
- * movement opens the existing calendar.
+ * top of the chat within the whole history. Grabbing the handle unfolds a ruler
+ * of years (and months, once sampled) along the edge; dragging scrubs through
+ * the history, a bubble next to the finger shows the month under it, and
+ * releasing jumps the chat to that date (through ChatActivity.jumpToDate).
+ * A tap without movement opens the existing calendar.
  *
- * The view consumes touches only on the handle, so the ordinary scrolling of the
- * chat is untouched.
+ * The ruler is proportional to content, not to time: a year with ten thousand
+ * messages takes ten times the height of a year with a thousand, with a floor
+ * so that every year stays legible. The mapping comes from ChatTimelineIndex.
+ * Without an index (or before it is ready) the handle is not shown.
  *
- * Lot 1: handle, show/hide cycle, drag with a provisional mapping that is linear
- * in time between a fixed origin and now, bubble with the month, jump, tap.
- * Lot 2 replaces the mapping with ChatTimelineIndex (content-proportional,
- * exact per month) and adds the unfolding ruler of years and months.
+ * The view consumes touches only on the handle, so the ordinary scrolling of
+ * the chat is untouched.
  */
-public class ChatTimelineView extends View {
+public class ChatTimelineView extends View implements ChatTimelineIndex.Listener {
 
     public interface Delegate {
         /** Called on release after a drag; date is in unix seconds. */
@@ -52,41 +54,52 @@ public class ChatTimelineView extends View {
         boolean canShow();
     }
 
-    /** Provisional origin of the mapping (14 August 2013, Telegram's first release). Lot 2 uses the real first message. */
-    private static final int ORIGIN_DATE = 1376438400;
+    public static final int WIDTH_DP = 80;
 
     private static final long HIDE_DELAY_MS = 1800;
     private static final float HANDLE_RADIUS_DP = 22f;
-    private static final float HANDLE_EDGE_INSET_DP = 7f; // how far the center sits from the edge; the disc is cut by the edge, like shared media
+    private static final float HANDLE_EDGE_INSET_DP = 7f; // the disc is cut by the edge, like the shared media scroller
     private static final float VERTICAL_MARGIN_DP = 8f;
+    private static final float PANEL_WIDTH_DP = 64f;
+    private static final float YEAR_FLOOR_DP = 28f;
+    private static final float LABEL_MIN_HEIGHT_DP = 14f;
 
     private final Theme.ResourcesProvider resourcesProvider;
     private Delegate delegate;
+    private ChatTimelineIndex index;
 
     private final Paint handlePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint chevronPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint bubblePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint panelPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint tickPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final TextPaint bubbleTextPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+    private final TextPaint yearTextPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
     private final Path chevronPath = new Path();
     private final RectF bubbleRect = new RectF();
+    private final RectF panelRect = new RectF();
     private final RectF hitRect = new RectF();
     private final Drawable shadowDrawable;
 
     private final AnimatedFloat showProgress;
     private final AnimatedFloat dragProgress;
 
+    private int panelBaseAlpha = 255;
+    private int bubbleBaseAlpha = 255;
+
     private final boolean rtl;
     private final float touchSlop;
 
     private boolean allowed;
     private boolean shown;
+    private boolean scrollActive;
     private boolean dragging;
     private boolean moved;
 
     private float boundsTop;
     private float boundsBottom;
 
-    /** 0 = oldest message (top of the ruler), 1 = newest (bottom), like the chat itself. */
+    /** 0 = top of the ruler (oldest), 1 = bottom (newest), like the chat itself. */
     private float progress = 1f;
     private int currentDate;
 
@@ -97,6 +110,19 @@ public class ChatTimelineView extends View {
     private int bubbleMonthKey = -1;
     private String bubbleText;
     private float bubbleTextWidth;
+
+    // year blocks of the ruler, laid out for the current travel height
+    private int blockCount;
+    private int[] blockYear = new int[0];
+    private int[] blockStartRank = new int[0];
+    private int[] blockMessages = new int[0];
+    private float[] blockTop = new float[0];
+    private float[] blockHeight = new float[0];
+    private String[] blockLabel = new String[0];
+    private float blocksTravel = -1f;
+    private int blocksTotal = -1;
+    private int blocksVersion = -1;
+    private int indexVersion;
 
     private final Calendar calendar = Calendar.getInstance();
 
@@ -116,15 +142,23 @@ public class ChatTimelineView extends View {
         touchSlop = ViewConfiguration.get(context).getScaledTouchSlop();
 
         showProgress = new AnimatedFloat(this, 180, CubicBezierInterpolator.EASE_OUT_QUINT);
-        dragProgress = new AnimatedFloat(this, 220, CubicBezierInterpolator.EASE_OUT_BACK);
+        dragProgress = new AnimatedFloat(this, 220, CubicBezierInterpolator.EASE_OUT_QUINT);
 
         chevronPaint.setStyle(Paint.Style.STROKE);
         chevronPaint.setStrokeWidth(AndroidUtilities.dp(2));
         chevronPaint.setStrokeCap(Paint.Cap.ROUND);
         chevronPaint.setStrokeJoin(Paint.Join.ROUND);
 
+        tickPaint.setStyle(Paint.Style.STROKE);
+        tickPaint.setStrokeWidth(AndroidUtilities.dp(1));
+        tickPaint.setStrokeCap(Paint.Cap.ROUND);
+
         bubbleTextPaint.setTextSize(AndroidUtilities.dp(14));
         bubbleTextPaint.setTypeface(AndroidUtilities.bold());
+
+        yearTextPaint.setTextSize(AndroidUtilities.dp(11));
+        yearTextPaint.setTypeface(AndroidUtilities.bold());
+        yearTextPaint.setTextAlign(rtl ? Paint.Align.LEFT : Paint.Align.RIGHT);
 
         shadowDrawable = ContextCompat.getDrawable(context, R.drawable.fast_scroll_shadow);
 
@@ -135,6 +169,17 @@ public class ChatTimelineView extends View {
 
     public void setDelegate(Delegate delegate) {
         this.delegate = delegate;
+    }
+
+    public void setIndex(ChatTimelineIndex index) {
+        if (this.index != null) {
+            this.index.setListener(null);
+        }
+        this.index = index;
+        blocksVersion = -1;
+        if (index != null) {
+            index.setListener(this);
+        }
     }
 
     public void setAllowed(boolean allowed) {
@@ -150,25 +195,35 @@ public class ChatTimelineView extends View {
         return dragging;
     }
 
-    /** The chat scrolled under the finger (or is flinging): show the handle. */
+    /** The chat scrolled under the finger (or is flinging): show the handle, once the index allows it. */
     public void onChatScrolled() {
         if (!allowed || (delegate != null && !delegate.canShow())) {
             return;
         }
+        scrollActive = true;
         AndroidUtilities.cancelRunOnUIThread(hideRunnable);
-        if (!shown) {
-            shown = true;
-            invalidate();
+        if (index == null) {
+            return;
+        }
+        index.load();
+        if (index.isUsable()) {
+            if (!shown) {
+                shown = true;
+                progress = progressForDate(currentDate);
+                invalidate();
+            }
         }
     }
 
     /** The chat stopped scrolling: hide the handle after a short delay. */
     public void onChatScrollIdle() {
+        scrollActive = false;
         scheduleHide(HIDE_DELAY_MS);
     }
 
     public void hideNow() {
         AndroidUtilities.cancelRunOnUIThread(hideRunnable);
+        scrollActive = false;
         if (shown && !dragging) {
             shown = false;
             invalidate();
@@ -196,6 +251,9 @@ public class ChatTimelineView extends View {
         }
         boundsTop = top;
         boundsBottom = bottom;
+        if (!dragging) {
+            progress = progressForDate(currentDate);
+        }
         if (shown || dragging) {
             invalidate();
         }
@@ -205,46 +263,44 @@ public class ChatTimelineView extends View {
         int background = Theme.getColor(Theme.key_windowBackgroundWhite, resourcesProvider);
         handlePaint.setColor(ColorUtils.blendARGB(background, Color.WHITE, 0.1f));
         chevronPaint.setColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText, resourcesProvider));
-        bubblePaint.setColor(Theme.getColor(Theme.key_chat_serviceBackground, resourcesProvider));
-        bubbleTextPaint.setColor(Theme.getColor(Theme.key_chat_serviceText, resourcesProvider));
+        int service = Theme.getColor(Theme.key_chat_serviceBackground, resourcesProvider);
+        bubblePaint.setColor(service);
+        bubbleBaseAlpha = Color.alpha(service);
+        panelBaseAlpha = Math.min(255, (int) (Color.alpha(service) * 1.15f));
+        panelPaint.setColor(ColorUtils.setAlphaComponent(service, panelBaseAlpha));
+        int text = Theme.getColor(Theme.key_chat_serviceText, resourcesProvider);
+        bubbleTextPaint.setColor(text);
+        yearTextPaint.setColor(text);
+        tickPaint.setColor(ColorUtils.setAlphaComponent(text, 110));
         invalidate();
     }
 
     public void destroy() {
         AndroidUtilities.cancelRunOnUIThread(hideRunnable);
+        if (index != null) {
+            index.setListener(null);
+        }
         dragging = false;
         shown = false;
+    }
+
+    @Override
+    public void onIndexUpdated(ChatTimelineIndex index) {
+        indexVersion++;
+        if (!dragging) {
+            progress = progressForDate(currentDate);
+        }
+        if (!shown && scrollActive && allowed && index.isUsable() && (delegate == null || delegate.canShow())) {
+            shown = true;
+        }
+        if (shown || dragging) {
+            invalidate();
+        }
     }
 
     private void scheduleHide(long delay) {
         AndroidUtilities.cancelRunOnUIThread(hideRunnable);
         AndroidUtilities.runOnUIThread(hideRunnable, delay);
-    }
-
-    // ---- mapping (provisional, lot 1) ----
-
-    private int nowDate() {
-        return (int) (System.currentTimeMillis() / 1000);
-    }
-
-    private float progressForDate(int date) {
-        int now = nowDate();
-        if (date <= ORIGIN_DATE) {
-            return 0f;
-        }
-        if (date >= now) {
-            return 1f;
-        }
-        return (date - ORIGIN_DATE) / (float) (now - ORIGIN_DATE);
-    }
-
-    private int dateForProgress(float p) {
-        int now = nowDate();
-        return ORIGIN_DATE + (int) ((now - ORIGIN_DATE) * clamp01(p));
-    }
-
-    private static float clamp01(float v) {
-        return v < 0f ? 0f : (v > 1f ? 1f : v);
     }
 
     // ---- geometry ----
@@ -275,6 +331,146 @@ public class ChatTimelineView extends View {
         return top + (bottom - top) * clamp01(progress);
     }
 
+    private static float clamp01(float v) {
+        return v < 0f ? 0f : (v > 1f ? 1f : v);
+    }
+
+    // ---- year blocks: the ruler is proportional to content with a floor per year ----
+
+    private void ensureBlocks() {
+        if (index == null || !index.isReady()) {
+            blockCount = 0;
+            return;
+        }
+        float travel = travelBottom() - travelTop();
+        if (travel <= 0) {
+            blockCount = 0;
+            return;
+        }
+        if (blocksVersion == indexVersion && Math.abs(blocksTravel - travel) < 0.5f && blocksTotal == index.totalCount) {
+            return;
+        }
+        blocksVersion = indexVersion;
+        blocksTravel = travel;
+        blocksTotal = index.totalCount;
+
+        int firstYear = index.getFirstYear();
+        int lastYear = index.getLastYear();
+        int n = Math.max(1, lastYear - firstYear + 1);
+        if (blockYear.length < n) {
+            blockYear = new int[n];
+            blockStartRank = new int[n];
+            blockMessages = new int[n];
+            blockTop = new float[n];
+            blockHeight = new float[n];
+            blockLabel = new String[n];
+        }
+        blockCount = n;
+        int total = Math.max(1, index.totalCount);
+        for (int i = 0; i < n; i++) {
+            int year = firstYear + i;
+            blockYear[i] = year;
+            blockStartRank[i] = i == 0 ? 0 : index.rankForYearStart(year);
+            int end = i == n - 1 ? total : index.rankForYearStart(year + 1);
+            blockMessages[i] = Math.max(0, end - blockStartRank[i]);
+            if (blockLabel[i] == null || !blockLabel[i].equals(String.valueOf(year))) {
+                blockLabel[i] = String.valueOf(year);
+            }
+        }
+
+        // proportional heights, raised to a floor, the rest shrunk to keep the sum
+        float floor = Math.min(AndroidUtilities.dp(YEAR_FLOOR_DP), travel / n);
+        boolean[] raised = new boolean[n];
+        for (int pass = 0; pass < 6; pass++) {
+            float fixed = 0f;
+            int freeMessages = 0;
+            for (int i = 0; i < n; i++) {
+                if (raised[i]) {
+                    fixed += floor;
+                } else {
+                    freeMessages += blockMessages[i];
+                }
+            }
+            float free = Math.max(0f, travel - fixed);
+            boolean changed = false;
+            for (int i = 0; i < n; i++) {
+                if (raised[i]) {
+                    blockHeight[i] = floor;
+                } else {
+                    float h = freeMessages > 0 ? free * blockMessages[i] / freeMessages : free / Math.max(1, n);
+                    if (h < floor) {
+                        raised[i] = true;
+                        changed = true;
+                        blockHeight[i] = floor;
+                    } else {
+                        blockHeight[i] = h;
+                    }
+                }
+            }
+            if (!changed) {
+                break;
+            }
+        }
+        float y = travelTop();
+        for (int i = 0; i < n; i++) {
+            blockTop[i] = y;
+            y += blockHeight[i];
+        }
+    }
+
+    /** Vertical position (in this view) of a date within the ruler. */
+    private float yForDate(int date) {
+        ensureBlocks();
+        if (blockCount == 0 || index == null) {
+            return travelBottom();
+        }
+        int rank = index.rankForDate(date);
+        for (int i = 0; i < blockCount; i++) {
+            int start = blockStartRank[i];
+            int count = blockMessages[i];
+            if (rank < start + count || i == blockCount - 1) {
+                float f = count > 0 ? clamp01((rank - start) / (float) count) : 0f;
+                return blockTop[i] + f * blockHeight[i];
+            }
+        }
+        return travelBottom();
+    }
+
+    /** Date under a vertical position of the ruler. */
+    private int dateForY(float y) {
+        ensureBlocks();
+        if (blockCount == 0 || index == null) {
+            return 0;
+        }
+        for (int i = 0; i < blockCount; i++) {
+            if (y < blockTop[i] + blockHeight[i] || i == blockCount - 1) {
+                float f = blockHeight[i] > 0 ? clamp01((y - blockTop[i]) / blockHeight[i]) : 0f;
+                int rank = blockStartRank[i] + Math.round(f * blockMessages[i]);
+                return index.dateForRank(rank);
+            }
+        }
+        return index.lastDate;
+    }
+
+    private int yearForY(float y) {
+        ensureBlocks();
+        for (int i = 0; i < blockCount; i++) {
+            if (y < blockTop[i] + blockHeight[i] || i == blockCount - 1) {
+                return blockYear[i];
+            }
+        }
+        return 0;
+    }
+
+    private float progressForDate(int date) {
+        float top = travelTop();
+        float bottom = travelBottom();
+        if (bottom <= top || date <= 0 || index == null || !index.isReady()) {
+            return 1f;
+        }
+        return clamp01((yForDate(date) - top) / (bottom - top));
+    }
+
     private float progressForY(float y) {
         float top = travelTop();
         float bottom = travelBottom();
@@ -284,9 +480,16 @@ public class ChatTimelineView extends View {
         return clamp01((y - top) / (bottom - top));
     }
 
+    private float yForProgress(float p) {
+        return travelTop() + (travelBottom() - travelTop()) * clamp01(p);
+    }
+
     // ---- bubble ----
 
     private void updateBubble(int date, boolean haptic) {
+        if (date <= 0) {
+            return;
+        }
         calendar.setTimeInMillis(date * 1000L);
         int key = calendar.get(Calendar.YEAR) * 12 + calendar.get(Calendar.MONTH);
         if (key == bubbleMonthKey) {
@@ -318,7 +521,7 @@ public class ChatTimelineView extends View {
         final float y = event.getY();
         switch (action) {
             case MotionEvent.ACTION_DOWN: {
-                if (!shown) {
+                if (!shown || index == null || !index.isUsable()) {
                     return false;
                 }
                 float cx = handleCenterX();
@@ -340,7 +543,8 @@ public class ChatTimelineView extends View {
                     performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP, HapticFeedbackConstants.FLAG_IGNORE_GLOBAL_SETTING);
                 } catch (Exception ignore) {}
                 bubbleMonthKey = -1;
-                updateBubble(currentDate > 0 ? currentDate : dateForProgress(progress), false);
+                updateBubble(currentDate > 0 ? currentDate : dateForY(cy), false);
+                index.refineYear(yearForY(cy));
                 invalidate();
                 return true;
             }
@@ -353,11 +557,13 @@ public class ChatTimelineView extends View {
                     moved = true;
                 }
                 if (moved) {
-                    float top = travelTop();
-                    float bottom = travelBottom();
-                    float travel = Math.max(1f, bottom - top);
+                    float travel = Math.max(1f, travelBottom() - travelTop());
                     progress = clamp01(startProgress + dy / travel);
-                    updateBubble(dateForProgress(progress), true);
+                    float handleY = yForProgress(progress);
+                    updateBubble(dateForY(handleY), true);
+                    if (index != null) {
+                        index.refineYear(yearForY(handleY));
+                    }
                     invalidate();
                 }
                 return true;
@@ -372,9 +578,12 @@ public class ChatTimelineView extends View {
                 }
                 if (delegate != null) {
                     if (moved) {
-                        delegate.onJumpToDate(dateForProgress(progress));
+                        int date = dateForY(yForProgress(progress));
+                        if (date > 0) {
+                            delegate.onJumpToDate(date);
+                        }
                     } else {
-                        delegate.onOpenCalendar(currentDate > 0 ? currentDate : nowDate());
+                        delegate.onOpenCalendar(currentDate > 0 ? currentDate : (int) (System.currentTimeMillis() / 1000));
                     }
                 }
                 scheduleHide(HIDE_DELAY_MS);
@@ -389,9 +598,7 @@ public class ChatTimelineView extends View {
                 if (getParent() != null) {
                     getParent().requestDisallowInterceptTouchEvent(false);
                 }
-                if (currentDate > 0) {
-                    progress = progressForDate(currentDate);
-                }
+                progress = progressForDate(currentDate);
                 scheduleHide(HIDE_DELAY_MS);
                 invalidate();
                 return true;
@@ -405,6 +612,7 @@ public class ChatTimelineView extends View {
     @Override
     protected void onDraw(Canvas canvas) {
         float visible = showProgress.set(shown || dragging ? 1f : 0f);
+        float drag = dragProgress.set(dragging ? 1f : 0f);
         if (visible <= 0f) {
             return;
         }
@@ -412,12 +620,48 @@ public class ChatTimelineView extends View {
         float cy = handleCenterY();
         float r = handleRadius();
         int alpha = (int) (255 * visible);
+        int width = getMeasuredWidth();
+
+        // the ruler of years, unfolding from the edge while dragging
+        if (drag > 0f) {
+            ensureBlocks();
+            float panelWidth = AndroidUtilities.dp(PANEL_WIDTH_DP) * drag;
+            float top = travelTop() - r - AndroidUtilities.dp(4);
+            float bottom = travelBottom() + r + AndroidUtilities.dp(4);
+            float radius = AndroidUtilities.dp(14);
+            if (rtl) {
+                panelRect.set(-radius, top, panelWidth, bottom);
+            } else {
+                panelRect.set(width - panelWidth, top, width + radius, bottom);
+            }
+            panelPaint.setAlpha((int) (panelBaseAlpha * drag * visible));
+            canvas.drawRoundRect(panelRect, radius, radius, panelPaint);
+
+            if (blockCount > 0 && drag > 0.5f) {
+                float textAlpha = (drag - 0.5f) * 2f * visible;
+                yearTextPaint.setAlpha((int) (255 * textAlpha));
+                tickPaint.setAlpha((int) (110 * textAlpha));
+                float labelX = rtl ? AndroidUtilities.dp(PANEL_WIDTH_DP - 30) : width - AndroidUtilities.dp(34);
+                float tickFrom = rtl ? AndroidUtilities.dp(4) : width - AndroidUtilities.dp(PANEL_WIDTH_DP - 4);
+                float tickTo = rtl ? AndroidUtilities.dp(10) : width - AndroidUtilities.dp(PANEL_WIDTH_DP - 10);
+                float minLabel = AndroidUtilities.dp(LABEL_MIN_HEIGHT_DP);
+                float textOffset = -(yearTextPaint.descent() + yearTextPaint.ascent()) / 2f;
+                for (int i = 0; i < blockCount; i++) {
+                    if (i > 0) {
+                        canvas.drawLine(tickFrom, blockTop[i], tickTo, blockTop[i], tickPaint);
+                    }
+                    if (blockHeight[i] >= minLabel) {
+                        canvas.drawText(blockLabel[i], labelX, blockTop[i] + blockHeight[i] / 2f + textOffset, yearTextPaint);
+                    }
+                }
+            }
+        }
 
         // shadow hugging the edge, like the shared media scroller
         if (shadowDrawable != null) {
             int w = shadowDrawable.getIntrinsicWidth();
             int h = shadowDrawable.getIntrinsicHeight();
-            int left = rtl ? 0 : getMeasuredWidth() - w;
+            int left = rtl ? 0 : width - w;
             shadowDrawable.setBounds(left, (int) (cy - h / 2f), left + w, (int) (cy + h / 2f));
             shadowDrawable.setAlpha(alpha);
             if (rtl) {
@@ -435,7 +679,6 @@ public class ChatTimelineView extends View {
         canvas.drawCircle(cx, cy, r, handlePaint);
 
         // two chevrons: up and down, spreading slightly while dragging
-        float drag = dragProgress.set(dragging ? 1f : 0f);
         chevronPaint.setAlpha(alpha);
         float chevronX = rtl ? cx + AndroidUtilities.dp(4) : cx - AndroidUtilities.dp(4);
         float half = AndroidUtilities.dp(4);
@@ -451,22 +694,22 @@ public class ChatTimelineView extends View {
         chevronPath.lineTo(chevronX + half, cy + gap);
         canvas.drawPath(chevronPath, chevronPaint);
 
-        // the bubble with the month under the finger
+        // the bubble with the month under the finger, left of the ruler
         if (drag > 0f && bubbleText != null) {
             float padH = AndroidUtilities.dp(12);
             float padV = AndroidUtilities.dp(7);
             float textH = bubbleTextPaint.descent() - bubbleTextPaint.ascent();
-            float width = bubbleTextWidth + padH * 2;
-            float height = textH + padV * 2;
-            float gapToHandle = AndroidUtilities.dp(10);
-            float left = rtl ? cx + r + gapToHandle : cx - r - gapToHandle - width;
-            bubbleRect.set(left, cy - height / 2f, left + width, cy + height / 2f);
+            float bubbleWidth = bubbleTextWidth + padH * 2;
+            float bubbleHeight = textH + padV * 2;
+            float edge = AndroidUtilities.dp(PANEL_WIDTH_DP + 8);
+            float left = rtl ? edge : width - edge - bubbleWidth;
+            bubbleRect.set(left, cy - bubbleHeight / 2f, left + bubbleWidth, cy + bubbleHeight / 2f);
 
             canvas.save();
             float s = 0.7f + 0.3f * drag;
             canvas.scale(s, s, rtl ? bubbleRect.left : bubbleRect.right, cy);
-            bubblePaint.setAlpha((int) (255 * drag * visible));
-            canvas.drawRoundRect(bubbleRect, height / 2f, height / 2f, bubblePaint);
+            bubblePaint.setAlpha((int) (bubbleBaseAlpha * drag * visible));
+            canvas.drawRoundRect(bubbleRect, bubbleHeight / 2f, bubbleHeight / 2f, bubblePaint);
             bubbleTextPaint.setAlpha((int) (255 * drag * visible));
             canvas.drawText(bubbleText, bubbleRect.left + padH, cy - (bubbleTextPaint.descent() + bubbleTextPaint.ascent()) / 2f, bubbleTextPaint);
             canvas.restore();
