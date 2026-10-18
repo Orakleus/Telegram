@@ -1,0 +1,144 @@
+name: Build Chronologie APK
+
+# Builds a debug APK (arm64 only) of the Telegram Android client with the
+# Chronologie feature, on a free GitHub-hosted runner, and publishes it as a
+# GitHub pre-release so it can be installed on a phone from a plain link.
+
+on:
+  push:
+    branches: [ chronologie ]
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+concurrency:
+  group: chronologie-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build arm64 debug APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    permissions:
+      contents: write
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 3G
+      CCACHE_COMPILERCHECK: content
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_SLOPPINESS: time_macros,include_file_mtime,include_file_ctime
+
+    steps:
+      - name: Free disk space on the runner
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/powershell \
+                      /usr/local/share/chromium /usr/local/lib/node_modules || true
+          for d in /usr/local/lib/android/sdk/ndk/*; do
+            case "$(basename "$d")" in 27.2.12479018) ;; *) sudo rm -rf "$d" ;; esac
+          done
+          sudo docker image prune --all --force > /dev/null 2>&1 || true
+          sudo apt-get clean > /dev/null 2>&1 || true
+          df -h / | tail -1
+
+      - name: Check out the source (shallow, with submodules)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK, NDK and CMake
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-36 build-tools;36.0.0 ndk;27.2.12479018 cmake;3.22.1'
+          log-accepted-android-sdk-licenses: false
+
+      - name: Install ccache
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ccache && ccache --version | head -1
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-arm64-${{ github.sha }}
+          restore-keys: |
+            ccache-arm64-
+
+      - name: Set up Gradle (with dependency cache)
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Inject Telegram API keys from repository secrets (optional)
+        env:
+          API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+        run: |
+          F=TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
+          if [ -n "$API_ID" ] && [ -n "$API_HASH" ]; then
+            sed -i "s|public static int APP_ID = .*;|public static int APP_ID = ${API_ID};|" "$F"
+            sed -i "s|public static String APP_HASH = .*;|public static String APP_HASH = \"${API_HASH}\";|" "$F"
+            echo "API keys injected from secrets."
+          else
+            echo "No TELEGRAM_API_ID / TELEGRAM_API_HASH secrets: building with the repository defaults."
+          fi
+
+      - name: Configure the build for CI (single ABI, ccache, memory)
+        run: |
+          # Only build the ABI of the test phone (arm64-v8a): four times less native compilation.
+          sed -i 's/abiFilters "armeabi-v7a", "arm64-v8a", "x86", "x86_64"/abiFilters "arm64-v8a"/' TMessagesProj_App/build.gradle
+          # Route the native (CMake) compilation through ccache so later builds are fast.
+          sed -i "s|arguments '-DANDROID_STL=c++_static', '-DANDROID_PLATFORM=android-21'|arguments '-DANDROID_STL=c++_static', '-DANDROID_PLATFORM=android-21', '-DCMAKE_C_COMPILER_LAUNCHER=ccache', '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache'|" TMessagesProj/build.gradle
+          grep -q COMPILER_LAUNCHER TMessagesProj/build.gradle && echo "ccache wired into CMake."
+          # The runner has 16 GB: keep Gradle well inside it.
+          sed -i 's/^org.gradle.jvmargs=.*/org.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8/' gradle.properties
+          echo "org.gradle.workers.max=4" >> gradle.properties
+          echo "org.gradle.daemon=false" >> gradle.properties
+          ccache --zero-stats > /dev/null
+
+      - name: Build the debug APK
+        run: |
+          ./gradlew :TMessagesProj_App:assembleAfatDebug \
+            -Pandroid.injected.build.abi=arm64-v8a \
+            --no-daemon --stacktrace --console=plain
+        env:
+          JAVA_TOOL_OPTIONS: -Dfile.encoding=UTF-8
+
+      - name: ccache statistics
+        if: always()
+        run: ccache --show-stats || true
+
+      - name: Name the APK
+        id: apk
+        run: |
+          SRC=TMessagesProj_App/build/outputs/apk/afat/debug/app.apk
+          ls -la "$SRC"
+          NAME="Telegram-Chronologie-build${{ github.run_number }}-arm64.apk"
+          cp "$SRC" "$NAME"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the APK as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.apk.outputs.name }}
+          path: ${{ steps.apk.outputs.name }}
+          if-no-files-found: error
+
+      - name: Publish the APK as a GitHub pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: chronologie-build-${{ github.run_number }}
+          name: Chronologie — build ${{ github.run_number }}
+          prerelease: true
+          body: |
+            Telegram Android 13.0.2 + Chronologie, debug build, arm64 only.
+            Commit: ${{ github.sha }}
+            Installs as « Telegram Beta » next to the regular Telegram app.
+          files: ${{ steps.apk.outputs.name }}
