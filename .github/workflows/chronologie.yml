@@ -127,10 +127,9 @@ jobs:
         id: apk
         if: always()
         run: |
-          APK=$(find TMessagesProj_App/build/outputs -name '*.apk' -type f 2>/dev/null | head -1 || true)
-          if [ -z "$APK" ]; then
-            APK=$(find . -path '*/build/outputs/apk/*' -name '*.apk' -type f 2>/dev/null | head -1 || true)
-          fi
+          # With android.injected.build.abi the Android Gradle plugin writes the APK under
+          # build/intermediates/apk instead of build/outputs/apk: look everywhere, take the largest.
+          APK=$(find . -path '*/build/*' -name '*.apk' -type f -printf '%s %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2- || true)
           echo "apk_found=$APK"
           if [ -n "$APK" ]; then
             NAME="Telegram-Chronologie-build${{ github.run_number }}-arm64.apk"
@@ -156,9 +155,9 @@ jobs:
             echo '```'
             df -h / | tail -1
             echo '```'
-            echo "### APK files under build/outputs"
+            echo "### APK files under build/"
             echo '```'
-            find . -path '*/build/outputs/*' -name '*.apk' -type f 2>/dev/null | head -20
+            find . -path '*/build/*' -name '*.apk' -type f -printf '%s %p\n' 2>/dev/null | sort -rn | head -20
             echo '```'
             echo "### ccache"
             echo '```'
