@@ -7212,6 +7212,19 @@ public class ChatActivity extends BaseFragment implements
             public boolean canShow() {
                 return !actionBar.isActionModeShowed() && !isReport() && (searchItem == null || !searchItem.isSearchFieldVisible());
             }
+
+            @Override
+            public void onDragChanged(boolean dragging) {
+                // the side buttons (page down, mentions, reactions) share the edge with the ruler: slide them away while scrubbing
+                if (sideControlsButtonsLayout != null) {
+                    sideControlsButtonsLayout.animate().cancel();
+                    sideControlsButtonsLayout.animate()
+                        .translationX(dragging ? dp(LocaleController.isRTL ? -96 : 96) : 0)
+                        .setDuration(220)
+                        .setInterpolator(CubicBezierInterpolator.EASE_OUT_QUINT)
+                        .start();
+                }
+            }
         });
         contentView.addView(timelineView, LayoutHelper.createFrame(ChatTimelineView.WIDTH_DP, LayoutHelper.MATCH_PARENT, Gravity.TOP | (LocaleController.isRTL ? Gravity.LEFT : Gravity.RIGHT)));
 

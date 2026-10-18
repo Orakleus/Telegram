@@ -52,15 +52,21 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
         void onOpenCalendar(int date);
         /** Whether the handle may be shown right now (false during selection mode, search, etc). */
         boolean canShow();
+        /** The user grabbed (true) or released (false) the handle: the chat can move its side buttons out of the way. */
+        void onDragChanged(boolean dragging);
     }
 
-    public static final int WIDTH_DP = 80;
+    public static final int WIDTH_DP = 220; // wide enough to hold the ruler and the bubble; touches outside the handle fall through
 
     private static final long HIDE_DELAY_MS = 1800;
     private static final float HANDLE_RADIUS_DP = 22f;
     private static final float HANDLE_EDGE_INSET_DP = 7f; // the disc is cut by the edge, like the shared media scroller
     private static final float VERTICAL_MARGIN_DP = 8f;
-    private static final float PANEL_WIDTH_DP = 64f;
+    /** Kept free above the composer, where the chat's side buttons live, so the handle sits under the thumb. */
+    private static final float BOTTOM_RESERVE_DP = 64f;
+    private static final float BAR_MAX_DP = 22f;
+    private static final float BAR_THICKNESS_DP = 2f;
+    private static final float PANEL_WIDTH_DP = 88f;
     private static final float YEAR_FLOOR_DP = 28f;
     private static final float LABEL_MIN_HEIGHT_DP = 14f;
 
@@ -75,6 +81,8 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
     private final Paint tickPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final TextPaint bubbleTextPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
     private final TextPaint yearTextPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+    private final TextPaint bubbleSubPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint barPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Path chevronPath = new Path();
     private final RectF bubbleRect = new RectF();
     private final RectF panelRect = new RectF();
@@ -110,6 +118,8 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
     private int bubbleMonthKey = -1;
     private String bubbleText;
     private float bubbleTextWidth;
+    private String bubbleSubText;
+    private float bubbleSubWidth;
 
     // year blocks of the ruler, laid out for the current travel height
     private int blockCount;
@@ -118,6 +128,9 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
     private int[] blockMessages = new int[0];
     private float[] blockTop = new float[0];
     private float[] blockHeight = new float[0];
+    // one bar per month of every year block (12 per block): vertical position and length (0 = unknown)
+    private float[] barY = new float[0];
+    private float[] barLength = new float[0];
     private String[] blockLabel = new String[0];
     private float blocksTravel = -1f;
     private int blocksTotal = -1;
@@ -159,6 +172,12 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
         yearTextPaint.setTextSize(AndroidUtilities.dp(11));
         yearTextPaint.setTypeface(AndroidUtilities.bold());
         yearTextPaint.setTextAlign(rtl ? Paint.Align.LEFT : Paint.Align.RIGHT);
+
+        bubbleSubPaint.setTextSize(AndroidUtilities.dp(11));
+
+        barPaint.setStyle(Paint.Style.STROKE);
+        barPaint.setStrokeWidth(AndroidUtilities.dp(BAR_THICKNESS_DP));
+        barPaint.setStrokeCap(Paint.Cap.ROUND);
 
         shadowDrawable = ContextCompat.getDrawable(context, R.drawable.fast_scroll_shadow);
 
@@ -272,6 +291,8 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
         bubbleTextPaint.setColor(text);
         yearTextPaint.setColor(text);
         tickPaint.setColor(ColorUtils.setAlphaComponent(text, 110));
+        barPaint.setColor(ColorUtils.setAlphaComponent(text, 150));
+        bubbleSubPaint.setColor(ColorUtils.setAlphaComponent(text, 200));
         invalidate();
     }
 
@@ -289,6 +310,9 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
         indexVersion++;
         if (!dragging) {
             progress = progressForDate(currentDate);
+        } else if (bubbleDate > 0) {
+            bubbleMonthKey = -1;
+            updateBubble(bubbleDate, false);
         }
         if (!shown && scrollActive && allowed && index.isUsable() && (delegate == null || delegate.canShow())) {
             shown = true;
@@ -319,7 +343,7 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
 
     private float travelBottom() {
         float bottom = boundsBottom > 0 ? boundsBottom : getMeasuredHeight();
-        return bottom - AndroidUtilities.dp(VERTICAL_MARGIN_DP) - handleRadius();
+        return bottom - AndroidUtilities.dp(VERTICAL_MARGIN_DP + BOTTOM_RESERVE_DP) - handleRadius();
     }
 
     private float handleCenterY() {
@@ -364,6 +388,8 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
             blockTop = new float[n];
             blockHeight = new float[n];
             blockLabel = new String[n];
+            barY = new float[n * 12];
+            barLength = new float[n * 12];
         }
         blockCount = n;
         int total = Math.max(1, index.totalCount);
@@ -415,6 +441,42 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
         for (int i = 0; i < n; i++) {
             blockTop[i] = y;
             y += blockHeight[i];
+        }
+        layoutMonthBars();
+    }
+
+    /** One bar per sampled month: placed at the middle of the month's band, as long as the month was busy. */
+    private void layoutMonthBars() {
+        int maxCount = 0;
+        for (int i = 0; i < blockCount; i++) {
+            int year = blockYear[i];
+            boolean refined = index.isYearRefined(year);
+            for (int m = 0; m < 12; m++) {
+                int k = i * 12 + m;
+                if (!refined) {
+                    barLength[k] = 0f;
+                    continue;
+                }
+                int from = index.startOf(year, m);
+                int to = m == 11 ? index.startOf(year + 1, 0) : index.startOf(year, m + 1);
+                if (to <= index.firstDate || from > index.lastDate) {
+                    barLength[k] = 0f;
+                    continue;
+                }
+                int count = index.countForMonth(year, m);
+                float y1 = yForDate(Math.max(from, index.firstDate));
+                float y2 = yForDate(Math.min(to, index.lastDate + 1));
+                barY[k] = (y1 + y2) / 2f;
+                barLength[k] = count;
+                maxCount = Math.max(maxCount, count);
+            }
+        }
+        float maxLength = AndroidUtilities.dp(BAR_MAX_DP);
+        float minLength = AndroidUtilities.dp(3);
+        for (int k = 0; k < blockCount * 12; k++) {
+            if (barLength[k] > 0f) {
+                barLength[k] = minLength + (maxLength - minLength) * (float) Math.sqrt(barLength[k] / (float) Math.max(1, maxCount));
+            }
         }
     }
 
@@ -501,6 +563,14 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
         bubbleDate = date;
         bubbleText = LocaleController.formatYearMont(date, true);
         bubbleTextWidth = bubbleTextPaint.measureText(bubbleText);
+        int year = calendar.get(Calendar.YEAR);
+        if (index != null && index.isReady() && index.isYearRefined(year)) {
+            bubbleSubText = LocaleController.formatPluralString("messages", index.countForMonth(year, calendar.get(Calendar.MONTH)));
+            bubbleSubWidth = bubbleSubPaint.measureText(bubbleSubText);
+        } else {
+            bubbleSubText = null;
+            bubbleSubWidth = 0f;
+        }
         if (haptic && !first) {
             try {
                 performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK, HapticFeedbackConstants.FLAG_IGNORE_GLOBAL_SETTING);
@@ -545,6 +615,9 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
                 bubbleMonthKey = -1;
                 updateBubble(currentDate > 0 ? currentDate : dateForY(cy), false);
                 index.refineYear(yearForY(cy));
+                if (delegate != null) {
+                    delegate.onDragChanged(true);
+                }
                 invalidate();
                 return true;
             }
@@ -577,6 +650,7 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
                     getParent().requestDisallowInterceptTouchEvent(false);
                 }
                 if (delegate != null) {
+                    delegate.onDragChanged(false);
                     if (moved) {
                         int date = dateForY(yForProgress(progress));
                         if (date > 0) {
@@ -597,6 +671,9 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
                 dragging = false;
                 if (getParent() != null) {
                     getParent().requestDisallowInterceptTouchEvent(false);
+                }
+                if (delegate != null) {
+                    delegate.onDragChanged(false);
                 }
                 progress = progressForDate(currentDate);
                 scheduleHide(HIDE_DELAY_MS);
@@ -641,17 +718,25 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
                 float textAlpha = (drag - 0.5f) * 2f * visible;
                 yearTextPaint.setAlpha((int) (255 * textAlpha));
                 tickPaint.setAlpha((int) (110 * textAlpha));
-                float labelX = rtl ? AndroidUtilities.dp(PANEL_WIDTH_DP - 30) : width - AndroidUtilities.dp(34);
+                float labelX = rtl ? AndroidUtilities.dp(34) : width - AndroidUtilities.dp(34);
                 float tickFrom = rtl ? AndroidUtilities.dp(4) : width - AndroidUtilities.dp(PANEL_WIDTH_DP - 4);
                 float tickTo = rtl ? AndroidUtilities.dp(10) : width - AndroidUtilities.dp(PANEL_WIDTH_DP - 10);
                 float minLabel = AndroidUtilities.dp(LABEL_MIN_HEIGHT_DP);
                 float textOffset = -(yearTextPaint.descent() + yearTextPaint.ascent()) / 2f;
+                barPaint.setAlpha((int) (150 * textAlpha));
+                float barFrom = rtl ? AndroidUtilities.dp(4) : width - AndroidUtilities.dp(PANEL_WIDTH_DP - 4);
                 for (int i = 0; i < blockCount; i++) {
                     if (i > 0) {
                         canvas.drawLine(tickFrom, blockTop[i], tickTo, blockTop[i], tickPaint);
                     }
                     if (blockHeight[i] >= minLabel) {
                         canvas.drawText(blockLabel[i], labelX, blockTop[i] + blockHeight[i] / 2f + textOffset, yearTextPaint);
+                    }
+                    for (int m = 0; m < 12; m++) {
+                        int k = i * 12 + m;
+                        if (barLength[k] > 0f) {
+                            canvas.drawLine(barFrom, barY[k], barFrom + barLength[k], barY[k], barPaint);
+                        }
                     }
                 }
             }
@@ -699,8 +784,9 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
             float padH = AndroidUtilities.dp(12);
             float padV = AndroidUtilities.dp(7);
             float textH = bubbleTextPaint.descent() - bubbleTextPaint.ascent();
-            float bubbleWidth = bubbleTextWidth + padH * 2;
-            float bubbleHeight = textH + padV * 2;
+            float subH = bubbleSubText != null ? bubbleSubPaint.descent() - bubbleSubPaint.ascent() + AndroidUtilities.dp(1) : 0f;
+            float bubbleWidth = Math.max(bubbleTextWidth, bubbleSubWidth) + padH * 2;
+            float bubbleHeight = textH + subH + padV * 2;
             float edge = AndroidUtilities.dp(PANEL_WIDTH_DP + 8);
             float left = rtl ? edge : width - edge - bubbleWidth;
             bubbleRect.set(left, cy - bubbleHeight / 2f, left + bubbleWidth, cy + bubbleHeight / 2f);
@@ -711,7 +797,12 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
             bubblePaint.setAlpha((int) (bubbleBaseAlpha * drag * visible));
             canvas.drawRoundRect(bubbleRect, bubbleHeight / 2f, bubbleHeight / 2f, bubblePaint);
             bubbleTextPaint.setAlpha((int) (255 * drag * visible));
-            canvas.drawText(bubbleText, bubbleRect.left + padH, cy - (bubbleTextPaint.descent() + bubbleTextPaint.ascent()) / 2f, bubbleTextPaint);
+            float textTop = bubbleRect.top + padV;
+            canvas.drawText(bubbleText, bubbleRect.left + padH, textTop - bubbleTextPaint.ascent(), bubbleTextPaint);
+            if (bubbleSubText != null) {
+                bubbleSubPaint.setAlpha((int) (200 * drag * visible));
+                canvas.drawText(bubbleSubText, bubbleRect.left + padH, textTop + textH + AndroidUtilities.dp(1) - bubbleSubPaint.ascent(), bubbleSubPaint);
+            }
             canvas.restore();
         }
     }
