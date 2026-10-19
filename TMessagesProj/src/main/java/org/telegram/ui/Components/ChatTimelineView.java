@@ -156,7 +156,7 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
     };
 
     // diagnostics: a small readout of the index traffic and of the time the last jump took, for test builds
-    public static final boolean DEBUG_READOUT = true;
+    public static final boolean DEBUG_READOUT = false;
     private final TextPaint readoutPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
     private final Paint readoutBackground = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF readoutRect = new RectF();
