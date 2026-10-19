@@ -16493,7 +16493,11 @@ public class ChatActivity extends BaseFragment implements
             }
         }
         if (timelineView != null) {
-            timelineView.setBounds(chatListView.getTranslationY() + chatListViewPaddingTop, chatListView.getTranslationY() + chatListView.getMeasuredHeight() - chatListView.getPaddingBottom());
+            // the ruler ends where the side buttons column ends, whatever sits under the list (composer, join bar, mute bar)
+            float timelineBottom = sideControlsButtonsLayout != null && sideControlsButtonsLayout.getHeight() > 0
+                ? sideControlsButtonsLayout.getY() + sideControlsButtonsLayout.getHeight()
+                : chatListView.getTranslationY() + chatListView.getMeasuredHeight() - chatListView.getPaddingBottom();
+            timelineView.setBounds(chatListView.getTranslationY() + chatListViewPaddingTop, timelineBottom);
         }
         if (minTopicMessageChild != null) {
             MessageObject messageObject;
