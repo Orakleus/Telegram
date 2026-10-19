@@ -72,6 +72,8 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
     private static final float PANEL_WIDTH_DP = 108f;
     private static final float YEAR_FLOOR_DP = 28f;
     private static final float LABEL_MIN_HEIGHT_DP = 14f;
+    /** The finger must rest this long on a month before it is measured: a sweep across the ruler costs nothing. */
+    private static final long REFINE_REST_MS = 500;
 
     private final Theme.ResourcesProvider resourcesProvider;
     private Delegate delegate;
@@ -631,7 +633,7 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
         pendingRefineKey = key;
         pendingRefineDate = date;
         AndroidUtilities.cancelRunOnUIThread(refineRunnable);
-        AndroidUtilities.runOnUIThread(refineRunnable, 200);
+        AndroidUtilities.runOnUIThread(refineRunnable, REFINE_REST_MS);
     }
 
     // ---- bubble ----

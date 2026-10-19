@@ -83,11 +83,12 @@ public class ChatTimelineIndex {
 
     private static final LruCache<String, ChatTimelineIndex> cache = new LruCache<>(16);
 
-    public static ChatTimelineIndex get(int currentAccount, long dialogId, int classGuid) {
-        String key = currentAccount + "_" + dialogId;
+    /** The index of a dialog, or of one thread of it (forum topic, comments) when {@code threadMessageId} is not 0. */
+    public static ChatTimelineIndex get(int currentAccount, long dialogId, long threadMessageId, int classGuid) {
+        String key = currentAccount + "_" + dialogId + (threadMessageId != 0 ? "_" + threadMessageId : "");
         ChatTimelineIndex index = cache.get(key);
         if (index == null) {
-            index = new ChatTimelineIndex(currentAccount, dialogId);
+            index = new ChatTimelineIndex(currentAccount, dialogId, threadMessageId);
             cache.put(key, index);
         }
         index.attach(classGuid);
@@ -96,6 +97,8 @@ public class ChatTimelineIndex {
 
     public final int currentAccount;
     public final long dialogId;
+    /** 0 for the whole dialog; otherwise the thread is read with messages.getReplies, like ChatActivity does. */
+    public final long threadMessageId;
     private int classGuid;
 
     public int totalCount = -1;
@@ -134,9 +137,10 @@ public class ChatTimelineIndex {
     private boolean saveScheduled;
     private Listener listener;
 
-    private ChatTimelineIndex(int currentAccount, long dialogId) {
+    private ChatTimelineIndex(int currentAccount, long dialogId, long threadMessageId) {
         this.currentAccount = currentAccount;
         this.dialogId = dialogId;
+        this.threadMessageId = threadMessageId;
         restore();
     }
 
@@ -451,16 +455,24 @@ public class ChatTimelineIndex {
     }
 
     private void send(final int date) {
-        TLRPC.TL_messages_getHistory req = new TLRPC.TL_messages_getHistory();
-        req.peer = MessagesController.getInstance(currentAccount).getInputPeer(dialogId);
-        req.limit = 1;
-        if (date == NEWEST_PROBE) {
-            req.offset_date = 0;
-        } else if (date == OLDEST_PROBE) {
-            req.offset_date = 1;
-            req.add_offset = -1;
+        int offsetDate = date == NEWEST_PROBE ? 0 : (date == OLDEST_PROBE ? 1 : date);
+        int addOffset = date == OLDEST_PROBE ? -1 : 0;
+        TLObject req;
+        if (threadMessageId != 0) {
+            TLRPC.TL_messages_getReplies replies = new TLRPC.TL_messages_getReplies();
+            replies.peer = MessagesController.getInstance(currentAccount).getInputPeer(dialogId);
+            replies.msg_id = (int) threadMessageId;
+            replies.limit = 1;
+            replies.offset_date = offsetDate;
+            replies.add_offset = addOffset;
+            req = replies;
         } else {
-            req.offset_date = date;
+            TLRPC.TL_messages_getHistory history = new TLRPC.TL_messages_getHistory();
+            history.peer = MessagesController.getInstance(currentAccount).getInputPeer(dialogId);
+            history.limit = 1;
+            history.offset_date = offsetDate;
+            history.add_offset = addOffset;
+            req = history;
         }
         inFlightDates.add(date);
         sentCount++;
@@ -566,7 +578,7 @@ public class ChatTimelineIndex {
     }
 
     private String storeKey() {
-        return currentAccount + "_" + dialogId;
+        return currentAccount + "_" + dialogId + (threadMessageId != 0 ? "_" + threadMessageId : "");
     }
 
     private void restore() {

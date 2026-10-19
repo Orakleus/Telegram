@@ -7180,10 +7180,10 @@ public class ChatActivity extends BaseFragment implements
 
         // Chronologie: timeline scrubber on the trailing edge of the chat
         timelineView = new ChatTimelineView(context, themeDelegate);
-        final boolean timelineAllowed = chatMode == MODE_DEFAULT && !isTopic && !isSecretChat() && !inPreviewMode && !isInsideContainer && !isReport();
+        final boolean timelineAllowed = chatMode == MODE_DEFAULT && !isSecretChat() && !inPreviewMode && !isInsideContainer && !isReport() && !(currentChat != null && ChatObject.isMonoForum(currentChat));
         timelineView.setAllowed(timelineAllowed);
         if (timelineAllowed) {
-            timelineView.setIndex(ChatTimelineIndex.get(currentAccount, dialog_id, classGuid));
+            timelineView.setIndex(ChatTimelineIndex.get(currentAccount, dialog_id, threadMessageId, classGuid));
         }
         timelineView.setDelegate(new ChatTimelineView.Delegate() {
             @Override
@@ -42767,6 +42767,9 @@ public class ChatActivity extends BaseFragment implements
             }
             if (topPanelLayout != null) {
                 topPanelLayout.updateColors();
+            }
+            if (timelineView != null) {
+                timelineView.updateColors();
             }
             if (suggestEmojiPanel != null) {
                 suggestEmojiPanel.updateColors();
