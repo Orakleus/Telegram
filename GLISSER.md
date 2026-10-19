@@ -185,3 +185,5 @@ Tournage : enregistreur d'écran, 1080p, 60 images par seconde, portrait, aucun 
 ## Journal
 
 **19 octobre 2026, soir.** Choix de « Glisser » parmi trois propositions (Glisser, Écouter, Fil). Repérage dans le code ; découverte du Quick Share de 13.0 (bulle de cinq visages sur la flèche de partage des posts de chaîne), qui devient l'argument de la soumission plutôt qu'un obstacle. Dossier et branche `glisser` créés.
+
+**20 octobre 2026, 0 h 30.** Lot 1 écrit (`MessageDragController`, `DropShelfView`, cinq accroches dans `ChatActivity` : champ, `createMessageDrag` en fin de `createView`, première ligne de `dispatchTouchEvent`, armement dans `createMenu` après `dimBehindView`, gardes de `canBeginSlide` / `isSwipeBackEnabled`, `destroy`). Vérification de types hors ligne avec un `android.jar` (API 34) et les sources de Telegram : aucune erreur dans les nouveaux fichiers ni dans les zones modifiées. Build 1 publiée (`glisser-build-1`, 65 Mo), à installer par-dessus la build 22 de Chronologie. En attente des trois dépôts filmés par Miguel ; la question du lot est celle de §3.6.
