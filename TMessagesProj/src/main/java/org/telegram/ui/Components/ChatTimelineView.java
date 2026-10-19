@@ -74,6 +74,8 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
     private static final float LABEL_MIN_HEIGHT_DP = 14f;
     /** The finger must rest this long on a month before it is measured: a sweep across the ruler costs nothing. */
     private static final long REFINE_REST_MS = 500;
+    private static final int PANEL_MIN_ALPHA = 178;
+    private static final int BUBBLE_MIN_ALPHA = 204;
 
     private final Theme.ResourcesProvider resourcesProvider;
     private Delegate delegate;
@@ -358,9 +360,11 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
         handlePaint.setColor(ColorUtils.blendARGB(background, Color.WHITE, 0.1f));
         chevronPaint.setColor(Theme.getColor(Theme.key_windowBackgroundWhiteBlackText, resourcesProvider));
         int service = Theme.getColor(Theme.key_chat_serviceBackground, resourcesProvider);
-        bubblePaint.setColor(service);
-        bubbleBaseAlpha = Color.alpha(service);
-        panelBaseAlpha = Math.min(255, (int) (Color.alpha(service) * 1.15f));
+        // the service colour is tuned for a small date pill over the wallpaper; the ruler and the bubble sit over
+        // message bubbles too, and carry text, so they are given a floor of opacity (light themes need it most)
+        bubbleBaseAlpha = Math.max(Color.alpha(service), BUBBLE_MIN_ALPHA);
+        bubblePaint.setColor(ColorUtils.setAlphaComponent(service, bubbleBaseAlpha));
+        panelBaseAlpha = Math.max(Math.min(255, (int) (Color.alpha(service) * 1.15f)), PANEL_MIN_ALPHA);
         panelPaint.setColor(ColorUtils.setAlphaComponent(service, panelBaseAlpha));
         int text = Theme.getColor(Theme.key_chat_serviceText, resourcesProvider);
         bubbleTextPaint.setColor(text);
