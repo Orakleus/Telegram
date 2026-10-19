@@ -1190,6 +1190,7 @@ public class ChatActivity extends BaseFragment implements
     };
 
     private QuickShareSelectorOverlayLayout quickShareSelectorOverlay;
+    private MessageDragController messageDrag; // "Drag to forward": pull a long-pressed bubble onto a recent chat
     private ChatSelectionReactionMenuOverlay selectionReactionsOverlay;
     private SecretVoicePlayer secretVoicePlayer;
 
@@ -3404,6 +3405,10 @@ public class ChatActivity extends BaseFragment implements
         super.onFragmentDestroy();
         if (messageMetricsView != null) {
             messageMetricsView.finish();
+        }
+        if (messageDrag != null) {
+            messageDrag.destroy();
+            messageDrag = null;
         }
         if (chatActivityEnterView != null) {
             chatActivityEnterView.onDestroy();
@@ -9019,11 +9024,84 @@ public class ChatActivity extends BaseFragment implements
             windowInsetsStateHolder.setupAnimatedInsetsProvider(((LaunchActivity) context).getRootAnimatedInsetsListener(), fragmentView);
         }
 
+        createMessageDrag(context);
+
         onBottomItemsVisibilityChanged();
         ViewCompat.setOnApplyWindowInsetsListener(fragmentView, this::onApplyWindowInsets);
         Timer.finish(t);
 
         return fragmentView;
+    }
+
+    /**
+     * "Drag to forward": after a long press, pulling a bubble sideways lifts a copy of it and
+     * raises a shelf of recent chats to drop it on. Everything lives in MessageDragController and
+     * DropShelfView; the chat only decides what may be dragged and performs the forward, the same
+     * way sendMessageFromQuickShare does.
+     */
+    private void createMessageDrag(Context context) {
+        messageDrag = new MessageDragController(context, contentView, chatListView, themeDelegate, new MessageDragController.Delegate() {
+            @Override
+            public boolean canDrag(ChatMessageCell cell) {
+                final MessageObject messageObject = cell == null ? null : cell.getMessageObject();
+                if (messageObject == null || getParentActivity() == null) {
+                    return false;
+                }
+                return chatMode == MODE_DEFAULT && currentEncryptedChat == null && !isInPreviewMode() && !isInsideContainer && !isReport()
+                    && !actionBar.isActionModeShowed() && !isPeerNoForwards()
+                    && messageObject.contentType == 0 && !messageObject.isSponsored() && messageObject.canForwardMessage()
+                    && !messageObject.isSending() && !messageObject.isSendError() && messageObject.getId() > 0
+                    && (threadMessageObjects == null || !threadMessageObjects.contains(messageObject));
+            }
+
+            @Override
+            public ArrayList<MessageObject> messagesToDrag(ChatMessageCell cell) {
+                final MessageObject messageObject = cell.getMessageObject();
+                final ArrayList<MessageObject> arrayList = new ArrayList<>();
+                if (messageObject.getGroupId() != 0) {
+                    final MessageObject.GroupedMessages groupedMessages = groupedMessagesMap.get(messageObject.getGroupId());
+                    if (groupedMessages != null) {
+                        arrayList.addAll(groupedMessages.messages);
+                    }
+                }
+                if (arrayList.isEmpty()) {
+                    arrayList.add(messageObject);
+                }
+                return arrayList;
+            }
+
+            @Override
+            public void onDragStarted() {
+                closeMenu();
+            }
+
+            @Override
+            public void forward(ArrayList<MessageObject> messages, long did) {
+                if (getParentActivity() == null || AlertsCreator.checkSlowMode(getContext(), currentAccount, did, false)) {
+                    return;
+                }
+                Runnable delayedRunnable = () -> {
+                    final int result = getSendMessagesHelper().sendMessage(messages, did, false, false, true, 0, 0);
+                    AlertsCreator.showSendMediaAlert(result, ChatActivity.this, null);
+                };
+                if (did == getUserConfig().getClientUserId()) {
+                    delayedRunnable.run();
+                    delayedRunnable = null;
+                }
+                final Bulletin bulletin = BulletinFactory.createForwardedBulletin(getContext(),
+                    ChatActivity.this, null, 1, did, messages.size(),
+                    getThemedColor(Theme.key_undo_background),
+                    getThemedColor(Theme.key_undo_infoColor),
+                    Bulletin.DURATION_PROLONG, null, delayedRunnable
+                );
+                bulletin.allowBlur().show(bulletin.getLayout() instanceof Bulletin.LottieLayoutWithReactions);
+            }
+
+            @Override
+            public int getBottomInset() {
+                return windowInsetsStateHolder.getCurrentMaxBottomInset();
+            }
+        });
     }
 
     private void createSearchHashtagViewsIfNeeded() {
@@ -17525,6 +17603,10 @@ public class ChatActivity extends BaseFragment implements
 
         @Override
         public boolean dispatchTouchEvent(MotionEvent ev) {
+            if (messageDrag != null && messageDrag.onDispatchTouchEvent(ev)) {
+                // a bubble is being dragged: nothing below may see the finger (must stay above the scrimView check)
+                return true;
+            }
             if (messageMetricsView != null) {
                 messageMetricsView.setIsUserActive();
             }
@@ -32548,6 +32630,9 @@ public class ChatActivity extends BaseFragment implements
             chatListView.stopScroll();
             chatLayoutManager.setCanScrollVertically(false);
             dimBehindView(v, true);
+            if (messageDrag != null) {
+                messageDrag.armFromMenu(v); // the finger is still down: a sideways pull will lift the bubble
+            }
             hideHints(false);
             if (topUndoView != null) {
                 topUndoView.hide(true, 1);
@@ -36907,7 +36992,8 @@ public class ChatActivity extends BaseFragment implements
             return false;
         }
         return swipeBackEnabled && chatActivityEnterView.swipeToBackEnabled() && pullingDownOffset == 0
-            && (quickShareSelectorOverlay == null || !quickShareSelectorOverlay.isActive());
+            && (quickShareSelectorOverlay == null || !quickShareSelectorOverlay.isActive())
+            && (messageDrag == null || !messageDrag.isDragging());
     }
 
     @Override
@@ -36919,7 +37005,8 @@ public class ChatActivity extends BaseFragment implements
             return false;
         }
         return swipeBackEnabled && (forwardingPreviewView == null || !forwardingPreviewView.isShowing())
-            && (quickShareSelectorOverlay == null || !quickShareSelectorOverlay.isActive());
+            && (quickShareSelectorOverlay == null || !quickShareSelectorOverlay.isActive())
+            && (messageDrag == null || !messageDrag.isDragging());
     }
 
     private boolean hasSendingMessagesInBotForum;
