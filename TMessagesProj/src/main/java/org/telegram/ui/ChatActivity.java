@@ -16493,9 +16493,9 @@ public class ChatActivity extends BaseFragment implements
             }
         }
         if (timelineView != null) {
-            // the ruler ends where the side buttons column ends, whatever sits under the list (composer, join bar, mute bar)
-            float timelineBottom = sideControlsButtonsLayout != null && sideControlsButtonsLayout.getHeight() > 0
-                ? sideControlsButtonsLayout.getY() + sideControlsButtonsLayout.getHeight()
+            // the ruler ends above the input bubble (composer, join or mute button), where the side buttons stack up
+            float timelineBottom = chatInputViewsContainer != null && chatInputViewsContainer.getInputBubbleTop() > 0
+                ? chatInputViewsContainer.getInputBubbleTop() - dp(4)
                 : chatListView.getTranslationY() + chatListView.getMeasuredHeight() - chatListView.getPaddingBottom();
             timelineView.setBounds(chatListView.getTranslationY() + chatListViewPaddingTop, timelineBottom);
         }
