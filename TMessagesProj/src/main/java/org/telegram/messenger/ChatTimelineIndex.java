@@ -16,7 +16,7 @@ import java.util.Collections;
 import java.util.HashSet;
 
 /**
- * Chronologie — the chronological index of a dialog.
+ * Timeline — the chronological index of a dialog.
  *
  * Knows, for a dialog, how many messages it holds, when the first and the last
  * were sent, and how many messages were sent before a set of boundary dates

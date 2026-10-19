@@ -25,7 +25,7 @@ import org.telegram.ui.ActionBar.Theme;
 import java.util.Calendar;
 
 /**
- * Chronologie — a timeline scrubber for the chat history.
+ * Timeline — a scrubber for the chat history.
  *
  * Lives on the trailing edge of the chat list, on top of it. A round handle
  * appears while the user scrolls, aligned with the date currently shown at the

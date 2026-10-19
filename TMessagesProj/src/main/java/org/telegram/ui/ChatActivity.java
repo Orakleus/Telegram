@@ -7178,7 +7178,7 @@ public class ChatActivity extends BaseFragment implements
             jumpToDate((int) (calendar.getTime().getTime() / 1000));
         });
 
-        // Chronologie: timeline scrubber on the trailing edge of the chat
+        // Timeline: a scrubber on the trailing edge of the chat (ChatTimelineView, ChatTimelineIndex)
         timelineView = new ChatTimelineView(context, themeDelegate);
         final boolean timelineAllowed = chatMode == MODE_DEFAULT && !isSecretChat() && !inPreviewMode && !isInsideContainer && !isReport() && !(currentChat != null && ChatObject.isMonoForum(currentChat));
         timelineView.setAllowed(timelineAllowed);
