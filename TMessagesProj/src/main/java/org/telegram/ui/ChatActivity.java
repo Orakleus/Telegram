@@ -16493,10 +16493,14 @@ public class ChatActivity extends BaseFragment implements
             }
         }
         if (timelineView != null) {
-            // the ruler ends above the input bubble (composer, join or mute button), where the side buttons stack up
-            float timelineBottom = chatInputViewsContainer != null && chatInputViewsContainer.getInputBubbleTop() > 0
-                ? chatInputViewsContainer.getInputBubbleTop() - dp(4)
-                : chatListView.getTranslationY() + chatListView.getMeasuredHeight() - chatListView.getPaddingBottom();
+            // the ruler ends where the side buttons column ends: above the input island (composer, join or mute
+            // button), the very expression updatePagedownButtonsPosition uses to place that column
+            float timelineBottom = contentView.getMeasuredHeight()
+                - windowInsetsStateHolder.getAnimatedMaxBottomInset()
+                - getTopicTabsSideSize(TopicsTabsView.Position.BOTTOM)
+                - inputIslandHeightCurrent
+                - dp(ChatInputViewsContainer.INPUT_BUBBLE_BOTTOM + 4);
+            timelineBottom = Math.min(timelineBottom, chatListView.getTranslationY() + chatListView.getMeasuredHeight() - chatListView.getPaddingBottom());
             timelineView.setBounds(chatListView.getTranslationY() + chatListViewPaddingTop, timelineBottom);
         }
         if (minTopicMessageChild != null) {
