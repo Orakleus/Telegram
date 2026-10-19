@@ -11,3 +11,4 @@ Chaque projet vit sur sa propre branche créée depuis `base-ci` ; chaque push d
 - Zéro allocation dans `onDraw`. Toute requête réseau liée au fragment par `bindRequestToGuid`. Le serveur rationne les méthodes par compte sur plusieurs minutes : une requête à la fois, jamais de salve, `RequestFlagFailOnServerErrors` pour voir les `FLOOD_WAIT`.
 - Le retour visuel vient de Miguel (captures et vidéos du téléphone) : demander précisément ce qu'il faut filmer. Pour une soumission, finir par une branche propre d'un seul commit sur `master`.
 - Précédent : projet « Chronologie » (branche `chronologie`, dossier `CHRONOLOGIE.md` sur cette branche), soumis à @designers le 19 octobre 2026.
+- Projet courant : « Glisser » (branche `glisser`, dossier `GLISSER.md` à la racine) : lire GLISSER.md avant tout ; ses cinq points d'accroche dans `ChatActivity` sont en §3.2.
