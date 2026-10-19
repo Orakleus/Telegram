@@ -150,6 +150,7 @@ import org.telegram.messenger.ChatMessageSharedResources;
 import org.telegram.messenger.ChatMessagesMetadataController;
 import org.telegram.messenger.ChatObject;
 import org.telegram.messenger.ChatThemeController;
+import org.telegram.messenger.ChatTimelineIndex;
 import org.telegram.utils.code.highlight.CodeHighlighting;
 import org.telegram.messenger.ContactsController;
 import org.telegram.messenger.DialogObject;
@@ -618,6 +619,7 @@ public class ChatActivity extends BaseFragment implements
     private AnimatedTextView searchExpandList;
     private AnimatedTextView searchOtherButton;
     private ChatActionCell floatingDateView;
+    private ChatTimelineView timelineView;
     private TopicSeparator.Cell floatingTopicSeparator;
     private float intoTopViewTop;
     private ChatActionCell infoTopView;
@@ -3404,6 +3406,9 @@ public class ChatActivity extends BaseFragment implements
         super.onFragmentDestroy();
         if (messageMetricsView != null) {
             messageMetricsView.finish();
+        }
+        if (timelineView != null) {
+            timelineView.destroy();
         }
         if (chatActivityEnterView != null) {
             chatActivityEnterView.onDestroy();
@@ -6835,6 +6840,9 @@ public class ChatActivity extends BaseFragment implements
                     checkTextureViewPosition = false;
                     hideFloatingDateView(true);
                     hideFloatingTopicView(true);
+                    if (timelineView != null) {
+                        timelineView.onChatScrollIdle();
+                    }
                     if (SharedConfig.getDevicePerformanceClass() == SharedConfig.PERFORMANCE_CLASS_LOW) {
                         scrolling = true;
                         NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.startAllHeavyOperations, 512);
@@ -6933,6 +6941,9 @@ public class ChatActivity extends BaseFragment implements
                         updateVisibleRows();
                     }
                     showFloatingDateView(true);
+                    if (timelineView != null) {
+                        timelineView.onChatScrolled();
+                    }
                 }
                 if (isAllChats() && dy != 0 && scrollingFloatingTopic && !currentFloatingTopIsNotMessage) {
                     if (highlightMessageId != Integer.MAX_VALUE) {
@@ -7166,6 +7177,56 @@ public class ChatActivity extends BaseFragment implements
             calendar.set(year, monthOfYear, dayOfMonth);
             jumpToDate((int) (calendar.getTime().getTime() / 1000));
         });
+
+        // Timeline: a scrubber on the trailing edge of the chat (ChatTimelineView, ChatTimelineIndex)
+        timelineView = new ChatTimelineView(context, themeDelegate);
+        final boolean timelineAllowed = chatMode == MODE_DEFAULT && !isSecretChat() && !inPreviewMode && !isInsideContainer && !isReport() && !(currentChat != null && ChatObject.isMonoForum(currentChat));
+        timelineView.setAllowed(timelineAllowed);
+        if (timelineAllowed) {
+            timelineView.setIndex(ChatTimelineIndex.get(currentAccount, dialog_id, threadMessageId, classGuid));
+        }
+        timelineView.setDelegate(new ChatTimelineView.Delegate() {
+            @Override
+            public void onJumpToDate(int date) {
+                if (actionBar.isActionModeShowed() || isReport()) {
+                    return;
+                }
+                jumpToDate(date);
+            }
+
+            @Override
+            public void onOpenCalendar(int date) {
+                if (actionBar.isActionModeShowed() || isReport()) {
+                    return;
+                }
+                Bundle bundle = new Bundle();
+                bundle.putLong("dialog_id", dialog_id);
+                bundle.putLong("topic_id", getTopicId());
+                bundle.putInt("type", CalendarActivity.TYPE_CHAT_ACTIVITY);
+                CalendarActivity calendarActivity = new CalendarActivity(bundle, SharedMediaLayout.FILTER_PHOTOS_AND_VIDEOS, date);
+                calendarActivity.setChatActivity(ChatActivity.this);
+                presentFragment(calendarActivity);
+            }
+
+            @Override
+            public boolean canShow() {
+                return !actionBar.isActionModeShowed() && !isReport() && (searchItem == null || !searchItem.isSearchFieldVisible());
+            }
+
+            @Override
+            public void onDragChanged(boolean dragging) {
+                // the side buttons (page down, mentions, reactions) share the edge with the ruler: slide them away while scrubbing
+                if (sideControlsButtonsLayout != null) {
+                    sideControlsButtonsLayout.animate().cancel();
+                    sideControlsButtonsLayout.animate()
+                        .translationX(dragging ? dp(LocaleController.isRTL ? -96 : 96) : 0)
+                        .setDuration(220)
+                        .setInterpolator(CubicBezierInterpolator.EASE_OUT_QUINT)
+                        .start();
+                }
+            }
+        });
+        contentView.addView(timelineView, LayoutHelper.createFrame(ChatTimelineView.WIDTH_DP, LayoutHelper.MATCH_PARENT, Gravity.TOP | (LocaleController.isRTL ? Gravity.LEFT : Gravity.RIGHT)));
 
         if (currentChat != null && chatMode != MODE_WELCOME_MESSAGES) {
             // todo: only for default mode ??
@@ -16426,7 +16487,21 @@ public class ChatActivity extends BaseFragment implements
             }
             if (messageObject != null && messageObject.messageOwner != null) {
                 floatingDateView.setCustomDate(messageObject.messageOwner.date, chatMode == MODE_SCHEDULED, true);
+                if (timelineView != null) {
+                    timelineView.setCurrentDate(messageObject.messageOwner.date);
+                }
             }
+        }
+        if (timelineView != null) {
+            // the ruler ends where the side buttons column ends: above the input island (composer, join or mute
+            // button), the very expression updatePagedownButtonsPosition uses to place that column
+            float timelineBottom = contentView.getMeasuredHeight()
+                - windowInsetsStateHolder.getAnimatedMaxBottomInset()
+                - getTopicTabsSideSize(TopicsTabsView.Position.BOTTOM)
+                - inputIslandHeightCurrent
+                - dp(ChatInputViewsContainer.INPUT_BUBBLE_BOTTOM + 4);
+            timelineBottom = Math.min(timelineBottom, chatListView.getTranslationY() + chatListView.getMeasuredHeight() - chatListView.getPaddingBottom());
+            timelineView.setBounds(chatListView.getTranslationY() + chatListViewPaddingTop, timelineBottom);
         }
         if (minTopicMessageChild != null) {
             MessageObject messageObject;
@@ -42700,6 +42775,9 @@ public class ChatActivity extends BaseFragment implements
             }
             if (topPanelLayout != null) {
                 topPanelLayout.updateColors();
+            }
+            if (timelineView != null) {
+                timelineView.updateColors();
             }
             if (suggestEmojiPanel != null) {
                 suggestEmojiPanel.updateColors();
