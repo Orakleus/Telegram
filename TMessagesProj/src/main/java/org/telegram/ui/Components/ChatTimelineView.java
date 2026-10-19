@@ -61,7 +61,7 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
 
     public static final int WIDTH_DP = 220; // wide enough to hold the ruler and the bubble; touches outside the handle fall through
 
-    private static final long HIDE_DELAY_MS = 3000;
+    private static final long HIDE_DELAY_MS = 5000; // long enough to reach the disc after the scroll stops; underneath lie the share buttons of channel posts
     private static final float HANDLE_RADIUS_DP = 22f;
     private static final float HANDLE_EDGE_INSET_DP = 26f; // whole disc visible, 4 dp from the edge, easy to grab
     private static final float VERTICAL_MARGIN_DP = 8f;

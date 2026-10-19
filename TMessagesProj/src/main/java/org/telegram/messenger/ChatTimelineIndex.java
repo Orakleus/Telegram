@@ -1,5 +1,7 @@
 package org.telegram.messenger;
 
+import android.content.Context;
+import android.content.SharedPreferences;
 import android.os.SystemClock;
 import android.util.LruCache;
 
@@ -28,12 +30,15 @@ import java.util.HashSet;
  * ChatActivity already performs to count a day's messages. Exact for every kind
  * of dialog; no new API, no schema change.
  *
- * The server rations messages.getHistory per account: too many calls in a short
- * time and every further call, including the chat's own jump to a date, is held
- * back for tens of seconds. So the index is deliberately slow: one request at a
- * time, never two closer than {@link #BASE_SEND_INTERVAL_MS}, a small burst then
- * a steady trickle, and it stops entirely for the time the server asks when a
- * FLOOD_WAIT comes back.
+ * The server rations messages.getHistory per account, on the total over several
+ * minutes as much as on the pace: too many calls and every further call,
+ * including the chat's own jump to a date, is held back for seconds or tens of
+ * seconds. So the index is deliberately frugal: one request at a time, never two
+ * closer than {@link #BASE_SEND_INTERVAL_MS}, a small burst then a steady
+ * trickle, months sampled only around the finger, a full stop for the time the
+ * server asks when a FLOOD_WAIT comes back — and what was measured once is kept
+ * on the device, so that a dialog already known costs a single request to
+ * refresh its end.
  *
  * All methods must be called on the UI thread.
  */
@@ -69,6 +74,12 @@ public class ChatTimelineIndex {
     private static final long RETRY_FAILED_AFTER_MS = 10_000;
     private static final int OLDEST_PROBE = -1;
     private static final int NEWEST_PROBE = -2;
+
+    private static final String STORE_NAME = "chronologie_index";
+    private static final int STORE_VERSION = 1;
+    private static final int STORE_MAX_DIALOGS = 48;
+    private static final long STORE_MAX_AGE_SECONDS = 30L * 86400;
+    private static final long SAVE_DELAY_MS = 1500;
 
     private static final LruCache<String, ChatTimelineIndex> cache = new LruCache<>(16);
 
@@ -117,13 +128,16 @@ public class ChatTimelineIndex {
     private long lastFailureClear;
     private boolean bootstrapStarted;
     private boolean newestKnown;
+    private boolean newestStale; // restored from the store: the newest message must be refreshed once
     private boolean oldestKnown;
     private boolean yearsComplete;
+    private boolean saveScheduled;
     private Listener listener;
 
     private ChatTimelineIndex(int currentAccount, long dialogId) {
         this.currentAccount = currentAccount;
         this.dialogId = dialogId;
+        restore();
     }
 
     /** A (new) fragment uses this index: requests are bound to its guid; the ones the old fragment cancelled are forgotten. */
@@ -204,7 +218,7 @@ public class ChatTimelineIndex {
 
     /** Starts loading: newest and oldest message, then every 1st of January. Cheap to call again. */
     public void load() {
-        if (yearsComplete || errorCount >= MAX_ERRORS) {
+        if (errorCount >= MAX_ERRORS || (yearsComplete && !newestStale)) {
             return;
         }
         if (!failed.isEmpty() && SystemClock.elapsedRealtime() - lastFailureClear > RETRY_FAILED_AFTER_MS) {
@@ -215,7 +229,14 @@ public class ChatTimelineIndex {
         if (!bootstrapStarted) {
             bootstrapStarted = true;
             queue.addFirst(NEWEST_PROBE);
-            queue.addLast(OLDEST_PROBE);
+            if (!oldestKnown) {
+                queue.addLast(OLDEST_PROBE);
+            }
+        } else if (newestStale) {
+            // restored from the store: the newest message is refreshed once, then the years checked
+            if (!isPending(NEWEST_PROBE) && !failed.contains(NEWEST_PROBE)) {
+                queue.addFirst(NEWEST_PROBE);
+            }
         } else if (isReady()) {
             enqueueYears();
         } else {
@@ -230,9 +251,10 @@ public class ChatTimelineIndex {
     }
 
     /**
-     * Asks for the month boundaries around {@code date}: the two enclosing the month under the finger first,
-     * then the other months of that year, nearest first. The queue is replaced each time, so sweeping across
-     * the ruler never piles up requests: at most one is in flight, the rest waits for the finger to settle.
+     * Asks for the month boundaries around {@code date}: the two enclosing the month under the finger, then
+     * one more on each side, nearest first — never a whole year, the server counts every call. The queue is
+     * replaced each time, so sweeping across the ruler never piles up requests: at most one is in flight,
+     * the rest waits for the finger to settle.
      */
     public void refineAround(int date) {
         if (!isReady() || date <= 0) {
@@ -242,9 +264,13 @@ public class ChatTimelineIndex {
         if (year < getFirstYear() || year > getLastYear()) {
             return;
         }
+        int month = monthOf(date);
         wanted.clear();
-        for (int month = Calendar.FEBRUARY; month <= Calendar.DECEMBER; month++) {
-            int d = startOf(year, month);
+        for (int m = month - 1; m <= month + 2; m++) {
+            if (m < Calendar.FEBRUARY || m > Calendar.DECEMBER) {
+                continue; // January boundaries belong to the bootstrap
+            }
+            int d = startOf(year, m);
             if (!isKnown(d) && !inFlightDates.contains(d) && !failed.contains(d)) {
                 wanted.add(d);
             }
@@ -488,16 +514,22 @@ public class ChatTimelineIndex {
         TLRPC.Message message = res.messages.isEmpty() ? null : res.messages.get(0);
 
         if (date == NEWEST_PROBE) {
-            if (message == null) {
-                totalCount = 0;
-                newestKnown = true;
-            } else {
-                totalCount = hasCount ? res.count : res.messages.size();
+            int newTotal = message == null ? 0 : (hasCount ? res.count : res.messages.size());
+            if (newestStale && totalCount > 0 && newTotal < totalCount * 0.9f) {
+                // many messages were deleted since the index was stored: the stored ranks are no longer trustworthy
+                samples.clear();
+                answered.clear();
+                yearsComplete = false;
+                FileLog.d("ChatTimelineIndex: stored samples dropped, total went from " + totalCount + " to " + newTotal);
+            }
+            newestStale = false;
+            totalCount = newTotal;
+            if (message != null) {
                 lastDate = message.date;
                 lastMessageId = message.id;
-                newestKnown = true;
                 FileLog.d("ChatTimelineIndex: newest message date=" + lastDate + " total=" + totalCount + " offset=" + res.offset_id_offset + " hasCount=" + hasCount);
             }
+            newestKnown = true;
         } else if (date == OLDEST_PROBE) {
             if (message != null) {
                 firstDate = message.date;
@@ -521,8 +553,128 @@ public class ChatTimelineIndex {
         if (isReady() && !yearsComplete) {
             enqueueYears();
         }
+        scheduleSave();
         if (listener != null) {
             listener.onIndexUpdated(this);
+        }
+    }
+
+    // ---- store: what was measured is kept on the device, one line per dialog ----
+
+    private static SharedPreferences store() {
+        return ApplicationLoader.applicationContext.getSharedPreferences(STORE_NAME, Context.MODE_PRIVATE);
+    }
+
+    private String storeKey() {
+        return currentAccount + "_" + dialogId;
+    }
+
+    private void restore() {
+        String line;
+        try {
+            line = store().getString(storeKey(), null);
+        } catch (Exception e) {
+            FileLog.e(e);
+            return;
+        }
+        if (line == null) {
+            return;
+        }
+        try {
+            String[] f = line.split(";");
+            if (f.length < 8 || Integer.parseInt(f[0]) != STORE_VERSION) {
+                return;
+            }
+            long savedAt = Long.parseLong(f[6]);
+            if (System.currentTimeMillis() / 1000 - savedAt > STORE_MAX_AGE_SECONDS) {
+                return;
+            }
+            firstDate = Integer.parseInt(f[1]);
+            firstMessageId = Integer.parseInt(f[2]);
+            lastDate = Integer.parseInt(f[3]);
+            lastMessageId = Integer.parseInt(f[4]);
+            totalCount = Integer.parseInt(f[5]);
+            if (f[7].length() > 0) {
+                for (String pair : f[7].split(",")) {
+                    int colon = pair.indexOf(':');
+                    if (colon <= 0) {
+                        continue;
+                    }
+                    int date = Integer.parseInt(pair.substring(0, colon));
+                    int rank = Integer.parseInt(pair.substring(colon + 1));
+                    insertSample(date, rank);
+                    answered.add(date);
+                }
+            }
+            oldestKnown = true;
+            newestKnown = totalCount > 0;
+            newestStale = true;
+            FileLog.d("ChatTimelineIndex: restored " + samples.size() + " samples for " + dialogId);
+        } catch (Exception e) {
+            FileLog.e(e);
+            samples.clear();
+            answered.clear();
+            oldestKnown = newestKnown = newestStale = false;
+            totalCount = -1;
+        }
+    }
+
+    private void scheduleSave() {
+        if (saveScheduled || !isReady() || newestStale) {
+            return;
+        }
+        saveScheduled = true;
+        AndroidUtilities.runOnUIThread(() -> {
+            saveScheduled = false;
+            save();
+        }, SAVE_DELAY_MS);
+    }
+
+    private void save() {
+        if (!isReady() || newestStale) {
+            return;
+        }
+        StringBuilder b = new StringBuilder(64 + samples.size() * 22);
+        b.append(STORE_VERSION).append(';').append(firstDate).append(';').append(firstMessageId).append(';')
+                .append(lastDate).append(';').append(lastMessageId).append(';').append(totalCount).append(';')
+                .append(System.currentTimeMillis() / 1000).append(';');
+        for (int i = 0, n = samples.size(); i < n; i++) {
+            Sample s = samples.get(i);
+            if (i > 0) {
+                b.append(',');
+            }
+            b.append(s.date).append(':').append(s.rankFromOldest);
+        }
+        try {
+            SharedPreferences prefs = store();
+            SharedPreferences.Editor editor = prefs.edit();
+            editor.putString(storeKey(), b.toString());
+            // keep the store small: the dialogs saved the longest ago make room
+            java.util.Map<String, ?> all = prefs.getAll();
+            if (all.size() >= STORE_MAX_DIALOGS) {
+                String oldestKey = null;
+                long oldestAt = Long.MAX_VALUE;
+                for (java.util.Map.Entry<String, ?> entry : all.entrySet()) {
+                    if (entry.getKey().equals(storeKey()) || !(entry.getValue() instanceof String)) {
+                        continue;
+                    }
+                    String[] f = ((String) entry.getValue()).split(";");
+                    long at = 0;
+                    try {
+                        at = f.length > 6 ? Long.parseLong(f[6]) : 0;
+                    } catch (Exception ignore) {}
+                    if (at < oldestAt) {
+                        oldestAt = at;
+                        oldestKey = entry.getKey();
+                    }
+                }
+                if (oldestKey != null) {
+                    editor.remove(oldestKey);
+                }
+            }
+            editor.apply();
+        } catch (Exception e) {
+            FileLog.e(e);
         }
     }
 
