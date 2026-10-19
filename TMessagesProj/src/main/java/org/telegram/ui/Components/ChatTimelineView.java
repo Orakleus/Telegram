@@ -6,9 +6,7 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RectF;
-import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
-import android.os.SystemClock;
 import android.text.TextPaint;
 import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
@@ -19,7 +17,6 @@ import androidx.core.content.ContextCompat;
 import androidx.core.graphics.ColorUtils;
 
 import org.telegram.messenger.AndroidUtilities;
-import org.telegram.messenger.BuildVars;
 import org.telegram.messenger.ChatTimelineIndex;
 import org.telegram.messenger.LocaleController;
 import org.telegram.messenger.R;
@@ -157,17 +154,6 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
         }
     };
 
-    // diagnostics: a small readout of the index traffic and of the time the last jump took, for test builds
-    public static final boolean DEBUG_READOUT = false;
-    private final TextPaint readoutPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
-    private final Paint readoutBackground = new Paint(Paint.ANTI_ALIAS_FLAG);
-    private final RectF readoutRect = new RectF();
-    private String readoutLine1;
-    private String readoutLine2;
-    private float readoutWidth;
-    private long jumpRequestedAt;
-    private long lastJumpMs = -1;
-
     private final Runnable hideRunnable = () -> {
         if (dragging) {
             scheduleHide(HIDE_DELAY_MS);
@@ -207,9 +193,6 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
         barPaint.setStyle(Paint.Style.STROKE);
         barPaint.setStrokeWidth(AndroidUtilities.dp(BAR_THICKNESS_DP));
         barPaint.setStrokeCap(Paint.Cap.ROUND);
-
-        readoutPaint.setTextSize(AndroidUtilities.dp(10));
-        readoutPaint.setTypeface(Typeface.MONOSPACE);
 
         shadowDrawable = null; // the disc no longer hugs the edge: a soft radial shadow replaces the edge drawable
         float r = AndroidUtilities.dp(HANDLE_RADIUS_DP);
@@ -291,53 +274,12 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
             return;
         }
         currentDate = date;
-        if (jumpRequestedAt != 0) {
-            // the chat shows another date for the first time since the release: the jump has landed
-            lastJumpMs = SystemClock.elapsedRealtime() - jumpRequestedAt;
-            jumpRequestedAt = 0;
-            if (DEBUG_READOUT) {
-                updateReadout();
-                shown = allowed;
-                scheduleHide(HIDE_DELAY_MS);
-            }
-        }
         if (!dragging) {
             progress = progressForDate(date);
             if (shown) {
                 invalidate();
             }
         }
-    }
-
-    /** Rebuilds the two lines of the debug readout; never called from onDraw. */
-    private void updateReadout() {
-        if (!DEBUG_READOUT) {
-            return;
-        }
-        StringBuilder b = new StringBuilder(64);
-        b.append(BuildVars.BUILD_VERSION_STRING);
-        if (index != null) {
-            b.append(" · env ").append(index.sentCount).append(" · rép ").append(index.answeredCount).append(" · err ").append(index.errorCount);
-        }
-        readoutLine1 = b.toString();
-        b.setLength(0);
-        if (index != null) {
-            b.append("flood ").append(index.floodCount);
-            if (index.floodCount > 0) {
-                b.append(" (").append(index.lastFloodSeconds).append(" s)");
-            }
-            b.append(" · ");
-        }
-        b.append("saut ");
-        if (jumpRequestedAt != 0) {
-            b.append("en cours");
-        } else if (lastJumpMs < 0) {
-            b.append("—");
-        } else {
-            b.append(lastJumpMs / 1000).append(',').append((lastJumpMs % 1000) / 100).append(" s");
-        }
-        readoutLine2 = b.toString();
-        readoutWidth = Math.max(readoutPaint.measureText(readoutLine1), readoutPaint.measureText(readoutLine2));
     }
 
     /** Vertical span of the chat area, in this view's coordinates (below the top panels, above the composer). */
@@ -372,8 +314,6 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
         tickPaint.setColor(ColorUtils.setAlphaComponent(text, 110));
         barPaint.setColor(ColorUtils.setAlphaComponent(text, 150));
         bubbleSubPaint.setColor(ColorUtils.setAlphaComponent(text, 200));
-        readoutPaint.setColor(text);
-        readoutBackground.setColor(service);
         invalidate();
     }
 
@@ -390,7 +330,6 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
     @Override
     public void onIndexUpdated(ChatTimelineIndex index) {
         indexVersion++;
-        updateReadout();
         if (!dragging) {
             progress = progressForDate(currentDate);
         } else if (bubbleDate > 0) {
@@ -760,9 +699,6 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
                     if (moved) {
                         int date = dateForY(yForProgress(progress));
                         if (date > 0) {
-                            jumpRequestedAt = SystemClock.elapsedRealtime();
-                            lastJumpMs = -1;
-                            updateReadout();
                             delegate.onJumpToDate(date);
                         }
                     } else {
@@ -924,20 +860,6 @@ public class ChatTimelineView extends View implements ChatTimelineIndex.Listener
                 canvas.drawText(bubbleSubText, bubbleRect.left + padH, textTop + textH + AndroidUtilities.dp(1) - bubbleSubPaint.ascent(), bubbleSubPaint);
             }
             canvas.restore();
-        }
-
-        // the debug readout, top of the view, out of the way of the ruler
-        if (DEBUG_READOUT && readoutLine1 != null) {
-            float pad = AndroidUtilities.dp(6);
-            float lineH = readoutPaint.descent() - readoutPaint.ascent();
-            float left = rtl ? width - readoutWidth - pad * 2 - AndroidUtilities.dp(4) : AndroidUtilities.dp(4);
-            float top = boundsTop + AndroidUtilities.dp(4);
-            readoutRect.set(left, top, left + readoutWidth + pad * 2, top + lineH * 2 + pad * 2);
-            readoutBackground.setAlpha((int) (bubbleBaseAlpha * visible));
-            canvas.drawRoundRect(readoutRect, AndroidUtilities.dp(8), AndroidUtilities.dp(8), readoutBackground);
-            readoutPaint.setAlpha(alpha);
-            canvas.drawText(readoutLine1, left + pad, top + pad - readoutPaint.ascent(), readoutPaint);
-            canvas.drawText(readoutLine2, left + pad, top + pad + lineH - readoutPaint.ascent(), readoutPaint);
         }
     }
 }

@@ -107,12 +107,8 @@ public class ChatTimelineIndex {
     public int firstMessageId;
     public int lastMessageId;
 
-    // diagnostics, shown by the view's debug readout
-    public int sentCount;
-    public int answeredCount;
-    public int errorCount;
-    public int floodCount;
-    public int lastFloodSeconds;
+    private int sentCount;
+    private int errorCount;
 
     private final ArrayList<Sample> samples = new ArrayList<>();
     private final HashSet<Integer> answered = new HashSet<>();
@@ -495,8 +491,6 @@ public class ChatTimelineIndex {
                 try {
                     seconds = Integer.parseInt(error.text.substring("FLOOD_WAIT_".length()));
                 } catch (Exception ignore) {}
-                floodCount++;
-                lastFloodSeconds = seconds;
                 floodWaitUntil = SystemClock.elapsedRealtime() + (seconds + 1) * 1000L;
                 sendInterval = Math.min(MAX_SEND_INTERVAL_MS, sendInterval * 2);
                 queue.addFirst(date);
@@ -520,7 +514,6 @@ public class ChatTimelineIndex {
         MessagesController.getInstance(currentAccount).putUsers(res.users, false);
         MessagesController.getInstance(currentAccount).putChats(res.chats, false);
         answered.add(date);
-        answeredCount++;
 
         boolean hasCount = !(res instanceof TLRPC.TL_messages_messages);
         TLRPC.Message message = res.messages.isEmpty() ? null : res.messages.get(0);
