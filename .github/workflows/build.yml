@@ -1,0 +1,263 @@
+name: Build Chronologie APK
+
+# Builds a debug APK (arm64 only) of the Telegram Android client with the
+# Chronologie feature, on a free GitHub-hosted runner, and publishes it as a
+# GitHub pre-release so it can be installed on a phone from a plain link.
+# The release notes carry build diagnostics, so the outcome can be read through
+# the GitHub API even when the raw job logs are out of reach.
+
+on:
+  push:
+    branches-ignore: [ master, base-ci ]
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build arm64 debug APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    permissions:
+      contents: write
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 3G
+      CCACHE_COMPILERCHECK: content
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_SLOPPINESS: time_macros,include_file_mtime,include_file_ctime
+
+    steps:
+      - name: Free disk space on the runner
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/share/swift \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/powershell \
+                      /usr/local/share/chromium /usr/local/lib/node_modules || true
+          for d in /usr/local/lib/android/sdk/ndk/*; do
+            case "$(basename "$d")" in 27.2.12479018) ;; *) sudo rm -rf "$d" ;; esac
+          done
+          sudo docker image prune --all --force > /dev/null 2>&1 || true
+          sudo apt-get clean > /dev/null 2>&1 || true
+          df -h / | tail -1
+
+      - name: Check out the source (shallow, with submodules)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK, NDK and CMake
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-36 build-tools;36.0.0 ndk;27.2.12479018 cmake;3.22.1'
+          log-accepted-android-sdk-licenses: false
+
+      - name: Install ccache
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ccache && ccache --version | head -1
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-arm64-${{ github.sha }}
+          restore-keys: |
+            ccache-arm64-
+
+      - name: Set up Gradle (with dependency cache)
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Inject Telegram API keys from repository secrets (optional)
+        env:
+          API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+        run: |
+          F=TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java
+          if [ -n "$API_ID" ] && [ -n "$API_HASH" ]; then
+            sed -i "s|public static int APP_ID = .*;|public static int APP_ID = ${API_ID};|" "$F"
+            sed -i "s|public static String APP_HASH = .*;|public static String APP_HASH = \"${API_HASH}\";|" "$F"
+            echo "api_keys=injected from secrets" >> ci-notes.txt
+          else
+            echo "api_keys=repository defaults (no secrets)" >> ci-notes.txt
+          fi
+          cat ci-notes.txt
+
+      - name: Give the build its own identity (package name, label, signing key)
+        run: |
+          # Play Protect blocks an app that carries Telegram's package name without Telegram's
+          # signature, and the public dummy keystore of the repository is on its lists. The test
+          # build therefore gets its own package name, its own label and its own signing key.
+          sed -i 's/^APP_PACKAGE=.*/APP_PACKAGE=app.chronologie.messenger/' gradle.properties
+          # The build number goes into the version name (Settings footer, and the view's debug readout),
+          # so that a recording tells which build it shows.
+          sed -i -E 's/^(APP_VERSION_NAME=.*)$/\1-b${{ github.run_number }}/' gradle.properties
+          sed -i 's|<string name="AppNameBeta">Telegram Beta</string>|<string name="AppNameBeta">Chronologie</string>|' TMessagesProj/src/main/res/values/strings.xml
+          # A launcher icon of its own (adaptive icon: solid background + simple timeline glyph).
+          mkdir -p TMessagesProj/src/main/res/drawable TMessagesProj/src/main/res/values
+          cat > TMessagesProj/src/main/res/values/chronologie_icon.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <color name="chronologie_icon_bg">#FF4F46E5</color>
+          </resources>
+          XML
+          cat > TMessagesProj/src/main/res/drawable/chronologie_icon_fg.xml <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#FFFFFFFF" android:pathData="M51,28 h6 v52 h-6 z" />
+              <path android:fillColor="#FFFFFFFF" android:pathData="M42,36 h24 v4 h-24 z" />
+              <path android:fillColor="#FFFFFFFF" android:pathData="M42,68 h24 v4 h-24 z" />
+              <path android:fillColor="#FFFFFFFF" android:pathData="M54,52 m-10,0 a10,10 0 1,1 20,0 a10,10 0 1,1 -20,0" />
+          </vector>
+          XML
+          for f in ic_launcher ic_launcher_round; do
+            cat > "TMessagesProj/src/main/res/mipmap-anydpi-v26/$f.xml" <<'XML'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/chronologie_icon_bg" />
+              <foreground android:drawable="@drawable/chronologie_icon_fg" />
+              <monochrome android:drawable="@drawable/chronologie_icon_fg" />
+          </adaptive-icon>
+          XML
+          done
+          python3 - <<'PY'
+          import json
+          p = 'TMessagesProj_App/google-services.json'
+          d = json.load(open(p))
+          clients = d['client']
+          template = next(c for c in clients if c['client_info']['android_client_info']['package_name'] == 'org.telegram.messenger.beta')
+          for name in ('app.chronologie.messenger', 'app.chronologie.messenger.beta'):
+              c = json.loads(json.dumps(template))
+              c['client_info']['android_client_info']['package_name'] = name
+              clients.append(c)
+          json.dump(d, open(p, 'w'), indent=2)
+          print('google-services.json now lists', [c['client_info']['android_client_info']['package_name'] for c in clients])
+          PY
+          cp ci/chronologie.keystore TMessagesProj/config/release.keystore
+          grep -n "^APP_PACKAGE" gradle.properties
+          echo "identity=app.chronologie.messenger.beta, label Chronologie, own icon, own key" >> ci-notes.txt
+
+      - name: Configure the build for CI (single ABI, ccache, memory)
+        run: |
+          # Only build the ABI of the test phone (arm64-v8a): four times less native compilation.
+          sed -i 's/abiFilters "armeabi-v7a", "arm64-v8a", "x86", "x86_64"/abiFilters "arm64-v8a"/' TMessagesProj_App/build.gradle
+          # Route the native (CMake) compilation through ccache so later builds are fast.
+          sed -i "s|arguments '-DANDROID_STL=c++_static', '-DANDROID_PLATFORM=android-21'|arguments '-DANDROID_STL=c++_static', '-DANDROID_PLATFORM=android-21', '-DCMAKE_C_COMPILER_LAUNCHER=ccache', '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache'|" TMessagesProj/build.gradle
+          grep -q COMPILER_LAUNCHER TMessagesProj/build.gradle && echo "ccache wired into CMake."
+          # The runner has 16 GB: keep Gradle well inside it.
+          sed -i 's/^org.gradle.jvmargs=.*/org.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8/' gradle.properties
+          echo "org.gradle.workers.max=4" >> gradle.properties
+          echo "org.gradle.daemon=false" >> gradle.properties
+          ccache --zero-stats > /dev/null
+
+      - name: Build the debug APK
+        id: build
+        run: |
+          set -o pipefail
+          ./gradlew :TMessagesProj_App:assembleAfatDebug \
+            -Pandroid.injected.build.abi=arm64-v8a \
+            -Pandroid.injected.testOnly=false \
+            --no-daemon --stacktrace --console=plain 2>&1 | tee build.log
+        env:
+          JAVA_TOOL_OPTIONS: -Dfile.encoding=UTF-8
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-arm64-${{ github.sha }}
+
+      - name: Locate and name the APK
+        id: apk
+        if: always()
+        run: |
+          # An APK built with IDE-injected properties is marked testOnly unless told otherwise:
+          # such an APK is refused by the normal installer ("App not installed").
+          if unzip -p TMessagesProj_App/build/intermediates/apk/afat/debug/app.apk AndroidManifest.xml 2>/dev/null | strings -e l | grep -q '^testOnly$'; then
+            echo "testOnly attribute still present in the manifest" | tee -a ci-notes.txt
+          else
+            echo "testOnly attribute absent from the manifest" | tee -a ci-notes.txt
+          fi
+          # With android.injected.build.abi the Android Gradle plugin writes the APK under
+          # build/intermediates/apk instead of build/outputs/apk: look everywhere, take the largest.
+          APK=$(find . -path '*/build/*' -name '*.apk' -type f -printf '%s %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2- || true)
+          echo "apk_found=$APK"
+          if [ -n "$APK" ]; then
+            NAME="${{ github.ref_name }}-build${{ github.run_number }}-arm64.apk"
+            cp "$APK" "$NAME"
+            ls -la "$NAME"
+            echo "name=$NAME" >> "$GITHUB_OUTPUT"
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Write build diagnostics
+        if: always()
+        run: |
+          {
+            echo "## Build ${{ github.run_number }} — commit ${{ github.sha }}"
+            echo
+            echo "- build step outcome: ${{ steps.build.outcome }}"
+            echo "- apk found: ${{ steps.apk.outputs.ok }} (${{ steps.apk.outputs.name }})"
+            cat ci-notes.txt 2>/dev/null | sed 's/^/- /'
+            echo
+            echo "### Disk"
+            echo '```'
+            df -h / | tail -1
+            echo '```'
+            echo "### APK files under build/"
+            echo '```'
+            find . -path '*/build/*' -name '*.apk' -type f -printf '%s %p\n' 2>/dev/null | sort -rn | head -20
+            echo '```'
+            echo "### ccache"
+            echo '```'
+            ccache --show-stats 2>/dev/null | head -30
+            echo '```'
+            echo "### Gradle output (last 150 lines)"
+            echo '```'
+            tail -n 150 build.log 2>/dev/null | cut -c1-400
+            echo '```'
+            echo "### Gradle errors and warnings of interest"
+            echo '```'
+            grep -nE "error:|FAILED|What went wrong|Exception|BUILD " build.log 2>/dev/null | head -80 | cut -c1-400
+            echo '```'
+          } > ci-diagnostics.md
+          wc -c ci-diagnostics.md
+
+      - name: Upload the APK as a workflow artifact
+        if: steps.apk.outputs.ok == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.apk.outputs.name }}
+          path: ${{ steps.apk.outputs.name }}
+          if-no-files-found: error
+
+      - name: Publish the APK (or the diagnostics) as a GitHub pre-release
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ github.ref_name }}-build-${{ github.run_number }}"
+          if [ "${{ steps.apk.outputs.ok }}" = "true" ]; then
+            gh release create "$TAG" "${{ steps.apk.outputs.name }}" --prerelease \
+              --title "${{ github.ref_name }} — build ${{ github.run_number }}" \
+              --notes-file ci-diagnostics.md
+          else
+            gh release create "$TAG" --prerelease \
+              --title "${{ github.ref_name }} — build ${{ github.run_number }} (FAILED)" \
+              --notes-file ci-diagnostics.md
+          fi
