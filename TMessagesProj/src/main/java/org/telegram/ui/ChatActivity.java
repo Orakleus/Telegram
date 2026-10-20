@@ -1862,6 +1862,11 @@ public class ChatActivity extends BaseFragment implements
                 chatListView.scrollBy(0, dy);
             }
         });
+        if (messageDrag != null) {
+            // the long press selected the message and the finger is still down: a sideways pull will lift it
+            final RecyclerView.ViewHolder holder = chatListView.findViewHolderForAdapterPosition(position);
+            messageDrag.armFromLongPress(holder != null ? holder.itemView : null);
+        }
     }
 
     RecyclerListView.OnItemClickListenerExtended onItemClickListener = new RecyclerListView.OnItemClickListenerExtended() {
@@ -9034,10 +9039,11 @@ public class ChatActivity extends BaseFragment implements
     }
 
     /**
-     * "Drag to forward": after a long press, pulling a bubble sideways lifts a copy of it and
-     * raises a shelf of recent chats to drop it on. Everything lives in MessageDragController and
-     * DropShelfView; the chat only decides what may be dragged and performs the forward, the same
-     * way sendMessageFromQuickShare does.
+     * "Drag to forward": a long press selects a message, as it always did; pulling it sideways
+     * while the finger is still down lifts a copy of the bubble (the whole selection, when the
+     * pressed message is part of one) and raises a shelf of recent chats to drop it on. Everything
+     * lives in MessageDragController and DropShelfView; the chat only decides what may be dragged
+     * and performs the forward, the same way sendMessageFromQuickShare does.
      */
     private void createMessageDrag(Context context) {
         messageDrag = new MessageDragController(context, contentView, chatListView, themeDelegate, new MessageDragController.Delegate() {
@@ -9047,10 +9053,11 @@ public class ChatActivity extends BaseFragment implements
                 if (messageObject == null || getParentActivity() == null) {
                     return false;
                 }
+                if (chatActivityEnterView != null && (chatActivityEnterView.isRecordingAudioVideo() || chatActivityEnterView.isRecordLocked())) {
+                    return false;
+                }
                 return chatMode == MODE_DEFAULT && currentEncryptedChat == null && !isInPreviewMode() && !isInsideContainer && !isReport()
-                    && !actionBar.isActionModeShowed() && !isPeerNoForwards()
-                    && messageObject.contentType == 0 && !messageObject.isSponsored() && messageObject.canForwardMessage()
-                    && !messageObject.isSending() && !messageObject.isSendError() && messageObject.getId() > 0
+                    && !isPeerNoForwards() && canForwardByDrag(messageObject)
                     && (threadMessageObjects == null || !threadMessageObjects.contains(messageObject));
             }
 
@@ -9058,7 +9065,24 @@ public class ChatActivity extends BaseFragment implements
             public ArrayList<MessageObject> messagesToDrag(ChatMessageCell cell) {
                 final MessageObject messageObject = cell.getMessageObject();
                 final ArrayList<MessageObject> arrayList = new ArrayList<>();
-                if (messageObject.getGroupId() != 0) {
+                final boolean pressedSelected = selectedMessagesIds[0].indexOfKey(messageObject.getId()) >= 0 || selectedMessagesIds[1].indexOfKey(messageObject.getId()) >= 0;
+                if (pressedSelected && actionBar.isActionModeShowed()) {
+                    // the whole selection, in chat order (the idiom of the Forward action of the selection bar)
+                    for (int a = 1; a >= 0; a--) {
+                        final ArrayList<Integer> ids = new ArrayList<>();
+                        for (int b = 0; b < selectedMessagesIds[a].size(); b++) {
+                            ids.add(selectedMessagesIds[a].keyAt(b));
+                        }
+                        Collections.sort(ids);
+                        for (int b = 0; b < ids.size(); b++) {
+                            final MessageObject selected = selectedMessagesIds[a].get(ids.get(b));
+                            if (selected != null && canForwardByDrag(selected)) {
+                                arrayList.add(selected);
+                            }
+                        }
+                    }
+                }
+                if (arrayList.isEmpty() && messageObject.getGroupId() != 0) {
                     final MessageObject.GroupedMessages groupedMessages = groupedMessagesMap.get(messageObject.getGroupId());
                     if (groupedMessages != null) {
                         arrayList.addAll(groupedMessages.messages);
@@ -9070,15 +9094,18 @@ public class ChatActivity extends BaseFragment implements
                 return arrayList;
             }
 
-            @Override
-            public void onDragStarted() {
-                closeMenu();
+            private boolean canForwardByDrag(MessageObject messageObject) {
+                return messageObject.contentType == 0 && !messageObject.isSponsored() && !messageObject.isEphemeral() && messageObject.canForwardMessage()
+                    && !messageObject.isSending() && !messageObject.isSendError() && messageObject.getId() > 0;
             }
 
             @Override
             public void forward(ArrayList<MessageObject> messages, long did) {
                 if (getParentActivity() == null || AlertsCreator.checkSlowMode(getContext(), currentAccount, did, false)) {
                     return;
+                }
+                if (actionBar.isActionModeShowed()) {
+                    clearSelectionMode();
                 }
                 Runnable delayedRunnable = () -> {
                     final int result = getSendMessagesHelper().sendMessage(messages, did, false, false, true, 0, 0);
@@ -32630,9 +32657,6 @@ public class ChatActivity extends BaseFragment implements
             chatListView.stopScroll();
             chatLayoutManager.setCanScrollVertically(false);
             dimBehindView(v, true);
-            if (messageDrag != null) {
-                messageDrag.armFromMenu(v); // the finger is still down: a sideways pull will lift the bubble
-            }
             hideHints(false);
             if (topUndoView != null) {
                 topUndoView.hide(true, 1);

@@ -14,6 +14,7 @@ import android.graphics.Outline;
 import android.graphics.Paint;
 import android.graphics.RectF;
 import android.os.SystemClock;
+import android.text.TextPaint;
 import android.view.Gravity;
 import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
@@ -30,27 +31,25 @@ import org.telegram.ui.Cells.ChatMessageCell;
 import java.util.ArrayList;
 
 /**
- * "Drag to forward". After a long press opened the context menu of a message, pulling the
- * bubble sideways (while the finger is still down) closes the menu and detaches a copy of the
- * bubble that follows the finger, while a shelf of recent chats ({@link DropShelfView}) rises
- * from the bottom. Dropping the copy on a chat forwards the message(s) through the delegate,
- * which uses the same send path and undo toast as Quick Share; releasing anywhere else springs
- * the copy back to its place.
+ * "Drag to forward". A long press selects a message, as it always did on Android. Pulling the
+ * bubble sideways while the finger is still down detaches a copy of it that follows the finger
+ * (the pressed message alone, or the whole selection it belongs to), while a shelf of recent
+ * chats ({@link DropShelfView}) rises from the bottom. Dropping the copy on a chat forwards the
+ * messages through the delegate, which uses the same send path and undo toast as Quick Share;
+ * releasing anywhere else springs the copy back to its place.
  *
- * The controller adds three views to the chat's content view, in this order: the shelf, then an
+ * The controller adds two views to the chat's content view, in this order: the shelf, then an
  * overlay that dims the chat above the shelf and carries the lifted bubble as its only child.
- * It sees every touch event first, through ChatActivityFragmentView.dispatchTouchEvent, which
- * is what lets it read the finger while the context menu (a separate window) is showing.
+ * It sees every touch event first, through ChatActivityFragmentView.dispatchTouchEvent: while
+ * armed it only watches, once dragging it consumes everything.
  */
 public class MessageDragController {
 
     public interface Delegate {
         /** Whether this cell may be dragged at all (chat mode, chat type, message type). */
         boolean canDrag(ChatMessageCell cell);
-        /** The messages a drag of this cell carries: the message alone, or its whole album. */
+        /** The messages a drag of this cell carries: the selection it belongs to, its album, or itself. */
         ArrayList<MessageObject> messagesToDrag(ChatMessageCell cell);
-        /** Called once when the drag starts; closes the context menu. */
-        void onDragStarted();
         /** Forwards the messages to the dialog and shows the forwarded toast with undo. */
         void forward(ArrayList<MessageObject> messages, long dialogId);
         /** Bottom system inset the shelf must stay above. */
@@ -58,7 +57,7 @@ public class MessageDragController {
     }
 
     private static final int STATE_IDLE = 0;
-    private static final int STATE_ARMED = 1;    // menu open, finger down on a draggable message
+    private static final int STATE_ARMED = 1;    // long press done, finger still down on a draggable message
     private static final int STATE_DRAGGING = 2;
     private static final int STATE_FLYING = 3;   // the copy flies into the avatar or back home
 
@@ -83,7 +82,7 @@ public class MessageDragController {
     private boolean allowed = true;
     private boolean pointerDown;
     private float lastX, lastY;        // last finger position, content-view coordinates
-    private float armX, armY;          // finger position when the menu opened
+    private float armX, armY;          // where the sideways pull is measured from
     private ChatMessageCell armedCell;
     private ArrayList<MessageObject> dragged;
 
@@ -135,10 +134,11 @@ public class MessageDragController {
     }
 
     /**
-     * Called by the chat when the context menu of a message opens on a long press. The finger is
-     * still down: from now on a sideways pull starts the drag, lifting it leaves the menu alone.
+     * Called by the chat when a long press selected a message. The finger is still down: from now
+     * on a sideways pull starts the drag; lifting the finger, or sweeping up and down to select
+     * more (the list's own gesture), leaves everything as it is.
      */
-    public void armFromMenu(View pressedView) {
+    public void armFromLongPress(View pressedView) {
         if (!allowed || !pointerDown || state != STATE_IDLE || !(pressedView instanceof ChatMessageCell)) {
             return;
         }
@@ -185,6 +185,11 @@ public class MessageDragController {
                     if (Math.abs(dx) >= AndroidUtilities.getPixelsInCM(0.4f, true) && Math.abs(dx) / 3f > Math.abs(dy)) {
                         startDrag(x, y);
                         return true;
+                    }
+                    if (Math.abs(dy) > Math.abs(dx)) {
+                        // the finger sweeps up or down (the list selects what it crosses): the pull is measured from here
+                        armX = x;
+                        armY = y;
                     }
                     return false;
                 }
@@ -234,12 +239,12 @@ public class MessageDragController {
         }
         state = STATE_DRAGGING;
 
-        // the list has an open gesture (its multi-select after a long press): close it
+        // the list has an open gesture (its sweep-to-select after a long press): close it
         final long now = SystemClock.uptimeMillis();
         final MotionEvent cancel = MotionEvent.obtain(now, now, MotionEvent.ACTION_CANCEL, 0, 0, 0);
         listView.dispatchTouchEvent(cancel);
         cancel.recycle();
-        delegate.onDragStarted();
+        bubble.setCount(dragged.size());
 
         // where the copy comes from, and where the finger holds it
         origin.set(
@@ -439,9 +444,13 @@ public class MessageDragController {
     private class LiftedBubble extends View {
 
         private final Paint paint = new Paint(Paint.FILTER_BITMAP_FLAG | Paint.ANTI_ALIAS_FLAG);
+        private final Paint badgePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final TextPaint badgeTextPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
         private Bitmap snapshot;
         private int snapshotWidth, snapshotHeight;
         int cellLeft, cellTop;   // top-left of the snapshot inside the cell
+        private String countText;      // the badge of a stack: how many messages travel, null for one
+        private float countTextWidth;
 
         LiftedBubble(Context context) {
             super(context);
@@ -449,6 +458,9 @@ public class MessageDragController {
             setPivotX(0);
             setPivotY(0);
             setElevation(dp(12));
+            badgeTextPaint.setTypeface(AndroidUtilities.bold());
+            badgeTextPaint.setTextSize(dp(13));
+            badgeTextPaint.setColor(Color.WHITE);
             setOutlineProvider(new ViewOutlineProvider() {
                 @Override
                 public void getOutline(View view, Outline outline) {
@@ -456,6 +468,18 @@ public class MessageDragController {
                     outline.setRoundRect(m, m, view.getMeasuredWidth() - m, view.getMeasuredHeight() - m, dp(12));
                 }
             });
+        }
+
+        /** The number of messages travelling; above one, a badge is drawn on the copy. */
+        void setCount(int count) {
+            if (count > 1) {
+                countText = String.valueOf(count);
+                countTextWidth = badgeTextPaint.measureText(countText);
+                badgePaint.setColor(Theme.getColor(Theme.key_chat_goDownButtonCounterBackground, resourcesProvider));
+            } else {
+                countText = null;
+            }
+            invalidate();
         }
 
         int getSnapshotWidth() {
@@ -544,6 +568,15 @@ public class MessageDragController {
         protected void onDraw(Canvas canvas) {
             if (snapshot != null && !snapshot.isRecycled()) {
                 canvas.drawBitmap(snapshot, 0, 0, paint);
+            }
+            if (countText != null) {
+                // the badge sits on the top-right corner of the bubble, inside the shadow margin
+                final float r = dp(11);
+                final float cx = snapshotWidth - dp(SNAPSHOT_MARGIN);
+                final float cy = dp(SNAPSHOT_MARGIN);
+                final float w = Math.max(2 * r, countTextWidth + dp(12));
+                canvas.drawRoundRect(cx - w / 2f, cy - r, cx + w / 2f, cy + r, r, r, badgePaint);
+                canvas.drawText(countText, cx - countTextWidth / 2f, cy - (badgeTextPaint.descent() + badgeTextPaint.ascent()) / 2f, badgeTextPaint);
             }
         }
     }
